@@ -1,0 +1,135 @@
+name: 镜像上游发布
+
+on:
+  schedule:
+    - cron: '37 2 */5 * *'  # 每5天 UTC 02:37 运行（在同步之后）
+  workflow_dispatch:
+
+# 防止并行运行，避免重复创建发布
+concurrency:
+  group: mirror-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: zhiyingzzhou/renewlet
+
+jobs:
+  mirror-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 获取上游最新发布
+        id: upstream
+        run: |
+          RELEASE=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest")
+
+          TAG=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name',''))")
+          NAME=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('name',''))")
+          BODY=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body',''))")
+          VERSION="${TAG#v}"
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          echo "$BODY" > /tmp/upstream-changelog.md
+          echo "上游最新发布: $TAG ($NAME)"
+
+      - name: 检查是否已镜像
+        id: check
+        run: |
+          MIRROR_TAG="mirror-${{ steps.upstream.outputs.version }}"
+
+          if git ls-remote --tags origin | grep -q "refs/tags/$MIRROR_TAG"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "已存在: $MIRROR_TAG，跳过"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "新版本: $MIRROR_TAG，开始镜像"
+          fi
+
+      - name: 下载上游发布文件
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          mkdir -p /tmp/release-assets
+
+          curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/tags/${{ steps.upstream.outputs.tag }}" \
+            | python3 -c "
+          import sys, json, urllib.request
+
+          release = json.load(sys.stdin)
+          assets = release.get('assets', [])
+
+          for asset in assets:
+              name = asset['name']
+              if name.endswith('.sig') or name == 'latest.json':
+                  continue
+              url = asset['browser_download_url']
+              print(f'下载: {name}')
+              urllib.request.urlretrieve(url, f'/tmp/release-assets/{name}')
+          "
+
+          echo "=== 已下载的文件 ==="
+          ls -lh /tmp/release-assets/
+
+      - name: 创建中文 Changelog
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.upstream.outputs.version }}"
+          TAG="${{ steps.upstream.outputs.tag }}"
+
+          cat > /tmp/release-body.md << CHANGELOG_EOF
+          ## Renewlet v${VERSION}（镜像版）
+
+          本版本自动镜像自上游 [zhiyingzzhou/renewlet](https://github.com/${{ env.UPSTREAM_REPO }}) 的 [${TAG}](https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${TAG}) 发布。
+
+          ---
+
+          ### 📋 版本说明
+
+          以下是上游发布的原始更新日志，内容由上游作者编写。
+
+          ---
+
+          CHANGELOG_EOF
+
+          cat /tmp/upstream-changelog.md >> /tmp/release-body.md
+
+          echo "---" >> /tmp/release-body.md
+          echo "" >> /tmp/release-body.md
+          echo "> 📖 **Renewlet** 是一个自托管的订阅续费追踪器，支持时区感知提醒、10种通知渠道、预算和支出分析。" >> /tmp/release-body.md
+          echo "> " >> /tmp/release-body.md
+          echo "> 📥 本镜像提供 Linux amd64/arm64 二进制文件和 Docker 镜像下载。" >> /tmp/release-body.md
+          echo "> " >> /tmp/release-body.md
+          echo "> 📖 更多详情请访问 [官方仓库](https://github.com/${{ env.UPSTREAM_REPO }})。" >> /tmp/release-body.md
+
+      - name: 创建镜像发布
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.upstream.outputs.version }}"
+          MIRROR_TAG="mirror-${VERSION}"
+
+          if git ls-remote --tags origin | grep -q "refs/tags/$MIRROR_TAG"; then
+            echo "远程已存在: $MIRROR_TAG，跳过"
+            exit 0
+          fi
+
+          git tag "$MIRROR_TAG"
+          git push origin "$MIRROR_TAG"
+
+          gh release create "$MIRROR_TAG" \
+            /tmp/release-assets/* \
+            --title "Renewlet v${VERSION}" \
+            --notes-file /tmp/release-body.md \
+            --latest
+
+          echo "✅ 已创建镜像发布: $MIRROR_TAG"
