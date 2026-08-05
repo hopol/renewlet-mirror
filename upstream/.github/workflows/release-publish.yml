@@ -1,0 +1,360 @@
+name: Release Publish
+
+# 唯一公开发布入口：任何 Docker 镜像、GitHub Release 和生产 Cloudflare 部署都从 v* tag 开始。
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  # 同一个 tag 的发布必须串行，避免重跑时同时写 GitHub Release 或移动镜像标签。
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is-stable: ${{ steps.version.outputs.is-stable }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.0.0
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve release metadata
+        id: version
+        # 下游用 is-stable 决定 draft/prerelease 和 Cloudflare 生产部署；RC 永远不能碰 latest/生产。
+        run: |
+          VERSION="$(node scripts/release.mjs validate-version "${GITHUB_REF_NAME}")"
+          node scripts/release.mjs validate-package-versions "$VERSION"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *"-rc."* ]]; then
+            echo "is-stable=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-stable=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate stable tag source
+        if: ${{ github.repository == 'zhiyingzzhou/renewlet' && steps.version.outputs.is-stable == 'true' }}
+        run: |
+          set -euo pipefail
+          git fetch origin main:refs/remotes/origin/main
+          TAG_SHA="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+          MAIN_SHA="$(git rev-parse "origin/main^{commit}")"
+          # 稳定版 tag 必须来自 main 历史；允许重跑旧 tag，所以不要求等于 origin/main 当前 head。
+          if ! git merge-base --is-ancestor "$TAG_SHA" "$MAIN_SHA"; then
+            echo "Stable release tag ${GITHUB_REF_NAME} must point to a commit reachable from origin/main." >&2
+            echo "tag=${TAG_SHA} origin/main=${MAIN_SHA}" >&2
+            exit 1
+          fi
+
+  docker:
+    needs: metadata
+    if: ${{ github.repository == 'zhiyingzzhou/renewlet' }}
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.0.0
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release version
+        run: node scripts/release.mjs validate-version "${{ needs.metadata.outputs.version }}"
+
+      - name: Validate deployment config
+        run: pnpm check:deploy
+
+      - name: Resolve Docker tags
+        id: tags
+        # tag 规则集中在 release.mjs：stable 才写 latest，RC 只写 rc，避免 workflow 分叉后语义漂移。
+        run: |
+          TAGS="$(node scripts/release.mjs docker-tags "${{ needs.metadata.outputs.version }}")"
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "$TAGS"
+
+      - name: Resolve build time
+        id: build-time
+        run: echo "value=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.1.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7.1.0
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            VERSION=${{ needs.metadata.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ steps.build-time.outputs.value }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate Docker Hub overview
+        # Docker Hub Overview 没有 GitHub 仓库上下文；同步前必须把 README 相对链接改成外站可访问的绝对 URL。
+        run: node scripts/dockerhub-overview.mjs --ref "${GITHUB_SHA}" --output tmp/dockerhub/README.md --check
+
+      - name: Update Docker Hub overview
+        # docker push 只写镜像 manifest；仓库 Overview 是独立元数据，必须随官方发布显式同步。
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: zhiyingzzhou/renewlet
+          short-description: Self-hosted subscription ledger and renewal reminders
+          readme-filepath: ./tmp/dockerhub/README.md
+
+  cloudflare-check:
+    needs: metadata
+    if: ${{ github.repository == 'zhiyingzzhou/renewlet' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.0.0
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check Cloudflare build
+        run: pnpm check:cloudflare
+
+      - name: Build Cloudflare assets
+        run: pnpm build:cloudflare
+
+  github-release:
+    if: ${{ github.repository == 'zhiyingzzhou/renewlet' }}
+    needs:
+      - metadata
+      - docker
+      - cloudflare-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.0.0
+        with:
+          node-version: 24
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version: 1.26.2
+          cache-dependency-path: apps/docker-server/go.sum
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build release body
+        # Release 正文优先来自 docs/release-notes/vX.Y.Z-zh.md，并在顶部放英文版入口；不要把全量 git log 刷进发布页。
+        run: node scripts/release.mjs release-body --version "${{ needs.metadata.outputs.version }}" > tmp-release-body.md
+
+      - name: Build Docker deployment asset
+        # 附件里的 compose/env 会 pin 到当前版本，避免用户下载历史 Release 却拉到 future latest。
+        run: node scripts/release.mjs package-docker "${{ needs.metadata.outputs.version }}"
+
+      - name: Build Linux self-update binaries
+        # 页面内自更新只替换 /opt/renewlet/current/renewlet；发布包必须和 Docker 镜像使用同一组 build metadata。
+        run: |
+          mkdir -p tmp/release
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          pnpm --filter @renewlet/client build
+          mkdir -p apps/docker-server/internal/static/public
+          find apps/docker-server/internal/static/public -mindepth 1 ! -name .gitkeep -delete
+          cp -R apps/web/dist/. apps/docker-server/internal/static/public/
+          for arch in amd64 arm64; do
+            out_dir="tmp/release/renewlet_${{ needs.metadata.outputs.version }}_linux_${arch}"
+            mkdir -p "$out_dir"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -C apps/docker-server -trimpath \
+              -ldflags="-s -w -X main.Version=${{ needs.metadata.outputs.version }} -X main.Commit=${GITHUB_SHA} -X main.BuildTime=${BUILD_TIME} -X main.BuildType=release" \
+              -o "../../${out_dir}/renewlet" ./cmd/renewlet
+            tar -C "$out_dir" -czf "tmp/release/renewlet_${{ needs.metadata.outputs.version }}_linux_${arch}.tar.gz" renewlet
+            rm -rf "$out_dir"
+          done
+          (cd tmp/release && sha256sum renewlet_${{ needs.metadata.outputs.version }}_linux_*.tar.gz > checksums.txt)
+
+      - name: Cleanup stale draft release
+        if: ${{ needs.metadata.outputs.is-stable != 'true' }}
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const tag = `v${{ needs.metadata.outputs.version }}`;
+            const { owner, repo } = context.repo;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+
+            // RC 应直接发布为 prerelease；同 tag 残留 draft 会让 softprops 在 finalizing 撞 tag_name already_exists。
+            for (const release of releases.filter((item) => item.draft && item.tag_name === tag)) {
+              core.info(`Deleting stale draft release ${release.id} for ${tag}`);
+              await github.rest.repos.deleteRelease({
+                owner,
+                repo,
+                release_id: release.id,
+              });
+            }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3.0.0
+        with:
+          tag_name: v${{ needs.metadata.outputs.version }}
+          prerelease: ${{ needs.metadata.outputs.is-stable != 'true' }}
+          draft: ${{ needs.metadata.outputs.is-stable == 'true' }}
+          body_path: tmp-release-body.md
+          fail_on_unmatched_files: true
+          files: |
+            tmp/release/renewlet-docker-v${{ needs.metadata.outputs.version }}.zip
+            tmp/release/renewlet_${{ needs.metadata.outputs.version }}_linux_amd64.tar.gz
+            tmp/release/renewlet_${{ needs.metadata.outputs.version }}_linux_arm64.tar.gz
+            tmp/release/checksums.txt
+
+  cloudflare-deploy:
+    needs:
+      - metadata
+      - github-release
+    if: ${{ github.repository == 'zhiyingzzhou/renewlet' && needs.metadata.outputs.is-stable == 'true' }}
+    # 稳定版才进入生产审批；RC 只保留 Cloudflare check/build 作为发布前验证。
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # GitHub Environment 是生产部署的人审闸门，保护远端 D1 migration 和 Worker 覆盖。
+    environment:
+      name: production-cloudflare
+    env:
+      CI_WRANGLER_CONFIG: wrangler.generated.jsonc
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WORKER_NAME: ${{ secrets.WORKER_NAME }}
+      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.0.0
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve build time
+        id: build-time
+        run: echo "value=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate stable release version
+        # 双保险：上游 job 已过滤 RC，但生产部署自身也拒绝候选版，避免改动条件时误放行。
+        run: |
+          VERSION="$(node scripts/release.mjs validate-version "${{ needs.metadata.outputs.version }}")"
+          if [[ "$VERSION" == *"-rc."* ]]; then
+            echo "Cloudflare production deploy only accepts stable versions." >&2
+            exit 1
+          fi
+
+      - name: Generate Cloudflare config
+        env:
+          RENEWLET_VERSION: ${{ needs.metadata.outputs.version }}
+          RENEWLET_COMMIT: ${{ github.sha }}
+          RENEWLET_BUILD_TIME: ${{ steps.build-time.outputs.value }}
+        run: pnpm cloudflare:config:ci
+
+      - name: Check Cloudflare build
+        run: pnpm check:cloudflare
+
+      - name: Build Cloudflare assets
+        run: pnpm build:cloudflare
+
+      - name: Apply D1 migrations
+        run: pnpm exec wrangler d1 migrations apply DB --remote --config "$CI_WRANGLER_CONFIG"
+
+      - name: Ensure Cloudflare Queues
+        run: pnpm cloudflare:queues:ensure
+
+      - name: Deploy Worker
+        run: pnpm exec wrangler deploy --config "$CI_WRANGLER_CONFIG"
+
+  fork-notice:
+    needs: metadata
+    if: ${{ github.repository != 'zhiyingzzhou/renewlet' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip official publishing on forks
+        run: |
+          echo "Release Publish is reserved for zhiyingzzhou/renewlet."
+          echo "Forks still get CI, Build Smoke, and Cloudflare Worker self-host deployment workflows."

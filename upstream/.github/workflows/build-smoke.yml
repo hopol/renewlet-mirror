@@ -1,0 +1,72 @@
+name: Build Smoke
+
+# 面向 fork、PR 和 dev 分支的无密钥构建冒烟；main/release 发布构建由 PR 与 tag workflow 覆盖。
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+      - "release/**"
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.0.0
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve build time
+        run: echo "RENEWLET_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Validate deployment config
+        run: pnpm check:deploy
+
+      - name: Check Cloudflare build path
+        run: pnpm check:cloudflare
+
+      - name: Build Cloudflare assets
+        env:
+          RENEWLET_VERSION: 0.0.0-dev
+          RENEWLET_COMMIT: ${{ github.sha }}
+        # Cloudflare 冒烟只产出本地静态资产和 Worker bundle，不应用 D1 migration，也不需要账号 secrets。
+        run: pnpm build:cloudflare
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Docker build smoke
+        uses: docker/build-push-action@v7.1.0
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            VERSION=0.0.0-dev
+            COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ env.RENEWLET_BUILD_TIME }}
+          platforms: linux/amd64
+          push: false
+          # 冒烟镜像只验证 Dockerfile 多阶段构建和自更新布局，不写 registry，fork 也能安全运行。
+          tags: renewlet:smoke
