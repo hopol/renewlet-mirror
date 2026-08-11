@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { adminResetUserMfaResponseSchema, adminResetUserPasskeysResponseSchema } from "./admin";
 import {
+  loginBodySchema,
   loginResponseSchema,
   mfaRecoveryCodesResponseSchema,
   mfaStatusResponseSchema,
@@ -23,11 +24,19 @@ describe("auth schemas", () => {
   it("accepts direct session login responses", () => {
     const parsed = loginResponseSchema.parse(success({
       type: "session",
-      session: { id: "session-token", expiresAt: "2026-07-01T00:00:00.000Z" },
+      session: { expiresAt: "2026-07-01T00:00:00.000Z" },
       user: { id: "usr_1", email: "admin@example.com", name: "Admin", role: "admin", banned: false },
     })).data;
 
     expect(parsed.type).toBe("session");
+  });
+
+  it("rejects leaking session identifiers in session responses", () => {
+    expect(loginResponseSchema.safeParse(success({
+      type: "session",
+      session: { id: "ses_1", expiresAt: "2026-07-01T00:00:00.000Z" },
+      user: { id: "usr_1", email: "admin@example.com", name: "Admin", role: "admin", banned: false },
+    })).success).toBe(false);
   });
 
   it("accepts MFA-required login responses with authenticator methods only", () => {
@@ -82,7 +91,7 @@ describe("auth schemas", () => {
     }).code).toBe("123456");
     expect(mfaRecoveryCodesResponseSchema.parse(success({
       type: "session",
-      session: { id: "renewed-session", expiresAt: "2026-07-01T00:00:00.000Z" },
+      session: { expiresAt: "2026-07-01T00:00:00.000Z" },
       user: { id: "usr_1", email: "admin@example.com", name: "Admin", role: "admin", banned: false },
       recoveryCodes: ["ABCD-EFGH-IJKL"],
     })).data.recoveryCodes).toHaveLength(1);
@@ -119,5 +128,23 @@ describe("auth schemas", () => {
     expect(adminResetUserMfaResponseSchema.parse(success({}))).toEqual(success({}));
     expect(adminResetUserPasskeysResponseSchema.parse(success({}))).toEqual(success({}));
     expect(adminResetUserMfaResponseSchema.safeParse({ ok: true }).success).toBe(false);
+  });
+
+  it("accepts optional Turnstile token on password login without widening the request body", () => {
+    expect(loginBodySchema.parse({
+      email: "admin@example.com",
+      password: "password123",
+      turnstileToken: " token-value ",
+    }).turnstileToken).toBe("token-value");
+    expect(loginBodySchema.safeParse({
+      email: "admin@example.com",
+      password: "password123",
+      turnstileToken: "",
+    }).success).toBe(false);
+    expect(loginBodySchema.safeParse({
+      email: "admin@example.com",
+      password: "password123",
+      token: "old-field",
+    }).success).toBe(false);
   });
 });

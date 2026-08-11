@@ -35,7 +35,10 @@ function envFixture(row: SubscriptionRow | null) {
         const statement = {
           bind: (...params: unknown[]) => ({
           first: vi.fn(async () => {
-            if (sql.includes("FROM subscriptions") && !sql.includes("SUM(CASE WHEN auto_renew")) {
+            if (sql.includes("COUNT(*) AS count") && sql.includes("MAX(updated_at)")) {
+              return { count: row ? 1 : 0, source_updated_at: row?.updated_at ?? "" };
+            }
+            if (sql.includes("FROM subscriptions") && sql.includes("WHERE user_id = ? AND id = ?")) {
               subscriptionLookupParams = params;
               return row;
             }
@@ -97,7 +100,7 @@ function subscriptionRow(overrides: Partial<SubscriptionRow> = {}): Subscription
     user_id: "usr_owner",
     name: "Manual Plan",
     logo: null,
-    price: 12,
+    price: "12",
     currency: "USD",
     billing_cycle: "monthly",
     custom_days: null,
@@ -121,6 +124,9 @@ function subscriptionRow(overrides: Partial<SubscriptionRow> = {}): Subscription
     repeat_reminder_enabled: 0,
     repeat_reminder_interval: "1h",
     repeat_reminder_window: "72h",
+    cost_sharing_json: "{}",
+    cost_sharing_collection_reminder_enabled: 0,
+    cost_sharing_next_collection_reminder_date: null,
     extra_json: "{}",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-31T00:00:00.000Z",
@@ -137,7 +143,7 @@ describe("Cloudflare subscription renewal route", () => {
   it("advances a manual expired subscription and keeps the lookup owner-scoped", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-02-01T08:00:00.000Z"));
-    authMocks.requireAuth.mockResolvedValue({ user: { id: "usr_owner" }, session: { id: "ses" }, token: "test" });
+    authMocks.requireAuth.mockResolvedValue({ user: { id: "usr_owner" }, session: { id: "ses" } });
     const fixture = envFixture(subscriptionRow());
 
     const response = await renewSubscription(requestFixture(), fixture.env, "sub_manual");
@@ -157,7 +163,7 @@ describe("Cloudflare subscription renewal route", () => {
   it("rejects auto-renewing subscriptions from the manual renew endpoint", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-02-01T08:00:00.000Z"));
-    authMocks.requireAuth.mockResolvedValue({ user: { id: "usr_owner" }, session: { id: "ses" }, token: "test" });
+    authMocks.requireAuth.mockResolvedValue({ user: { id: "usr_owner" }, session: { id: "ses" } });
     const fixture = envFixture(subscriptionRow({ auto_renew: 1 }));
 
     await expect(renewSubscription(requestFixture({}), fixture.env, "sub_manual"))
@@ -169,7 +175,7 @@ describe("Cloudflare subscription renewal route", () => {
   it("advances manual recurring subscriptions that do not know their start date", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-02-01T08:00:00.000Z"));
-    authMocks.requireAuth.mockResolvedValue({ user: { id: "usr_owner" }, session: { id: "ses" }, token: "test" });
+    authMocks.requireAuth.mockResolvedValue({ user: { id: "usr_owner" }, session: { id: "ses" } });
     const fixture = envFixture(subscriptionRow({
       start_date: null,
       auto_calculate_next_billing_date: 0,

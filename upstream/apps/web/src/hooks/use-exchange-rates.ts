@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getApiLocale } from "@/i18n/api-locale";
 import { translate } from "@/i18n/messages";
-import { getIntlCurrencySymbol } from "@/lib/currency-data";
+import { getIntlCurrencyNarrowSymbol, getIntlCurrencySymbol } from "@/lib/currency-data";
 import type {
   ExchangeRateCoverageWarning,
   ExchangeRateProvider,
@@ -10,6 +10,7 @@ import type {
 } from "@/lib/api/schemas/exchange-rates";
 import { formatNumberMaxFractionDigits } from "@/lib/number-format";
 import type { RawErrorResponseDetails } from "@/lib/raw-error-response";
+import { moneyToNumber } from "@renewlet/shared/money";
 import {
   DEFAULT_EXCHANGE_RATE_PROVIDER,
   FALLBACK_RATES,
@@ -36,6 +37,7 @@ export function createUseExchangeRates(store: ExchangeRateStore) {
     const [error, setError] = useState<string | null>(null);
     const [errorDetails, setErrorDetails] = useState<RawErrorResponseDetails | null>(null);
     const [warning, setWarning] = useState<ExchangeRateCoverageWarning | null>(null);
+    const [sourceDate, setSourceDate] = useState<string | null>(null);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
     const mountedRef = useRef(false);
     const requestSeqRef = useRef(0);
@@ -45,12 +47,14 @@ export function createUseExchangeRates(store: ExchangeRateStore) {
       baseRate: string;
       activeProvider: ExchangeRateSource;
       warning: ExchangeRateCoverageWarning | null;
+      sourceDate: string;
       lastUpdated: Date;
     }) => {
       setRates(snapshot.rates);
       setBaseRate(snapshot.baseRate);
       setActiveProvider(snapshot.activeProvider);
       setWarning(snapshot.warning);
+      setSourceDate(snapshot.sourceDate);
       setLastUpdated(snapshot.lastUpdated);
     }, []);
 
@@ -100,6 +104,7 @@ export function createUseExchangeRates(store: ExchangeRateStore) {
           setBaseRate("USD");
           setActiveProvider("builtin");
           setWarning(null);
+          setSourceDate(null);
         })
         .finally(() => {
           if (mountedRef.current && requestSeqRef.current === requestSeq) {
@@ -121,17 +126,18 @@ export function createUseExchangeRates(store: ExchangeRateStore) {
     }, [fetchRates]);
 
     const convert = useCallback((
-      amount: number,
+      amount: number | string,
       fromCurrency: string,
       toCurrency: string,
     ): number => {
-      if (fromCurrency === toCurrency) return amount;
+      const numericAmount = moneyToNumber(amount);
+      if (fromCurrency === toCurrency) return numericAmount;
 
       const fromRate = rates[fromCurrency] || 1;
       const toRate = rates[toCurrency] || 1;
 
       // 远端数据统一归一为 USD base；先转 base 再转目标币种，避免维护 N*N 汇率表。
-      const amountInBase = amount / fromRate;
+      const amountInBase = numericAmount / fromRate;
       return amountInBase * toRate;
     }, [rates]);
 
@@ -144,9 +150,12 @@ export function createUseExchangeRates(store: ExchangeRateStore) {
       currency: string,
       maxFractionDigits = 3,
     ): string => {
-      const symbol = getCurrencySymbol(currency);
-      return `${symbol}${formatNumberMaxFractionDigits(amount, maxFractionDigits)}`;
-    }, [getCurrencySymbol]);
+      const currencyCode = currency.trim().toUpperCase() || currency;
+      const symbol = getIntlCurrencyNarrowSymbol(currencyCode);
+      const formattedAmount = formatNumberMaxFractionDigits(amount, maxFractionDigits);
+      if (!symbol || symbol.trim().toUpperCase() === currencyCode) return `${formattedAmount} ${currencyCode}`;
+      return `${symbol}${formattedAmount} ${currencyCode}`;
+    }, []);
 
     return {
       rates,
@@ -156,6 +165,7 @@ export function createUseExchangeRates(store: ExchangeRateStore) {
       error,
       errorDetails,
       warning,
+      sourceDate,
       lastUpdated,
       convert,
       getCurrencySymbol,

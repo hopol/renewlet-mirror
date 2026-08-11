@@ -12,8 +12,8 @@ export interface AuthUserResponse {
 
 export interface SessionResponse {
   type: "session";
-  // session.id 对前端是 Bearer token，不是数据库 session row id；两种运行面都遵守这个形状。
-  session: { id: string; expiresAt: string };
+  // 浏览器 session token 只存在 HttpOnly cookie；响应只暴露过期时间和用户安全视图。
+  session: { expiresAt: string };
   user: AuthUserResponse;
 }
 
@@ -42,7 +42,6 @@ export const authUserSchema: z.ZodType<AuthUserResponse> = z.object({
 export const sessionPayloadSchema = z.object({
   type: z.literal("session"),
   session: z.object({
-    id: z.string().min(1),
     expiresAt: z.iso.datetime(),
   }).strict(),
   user: authUserSchema,
@@ -72,10 +71,11 @@ export const setupCreateBodySchema = z.object({
   password: z.string().min(8).max(72),
 }).strict();
 
-/** 登录请求不接受额外字段；Cloudflare/Go 都应只按 email+password 建立会话。 */
+/** 登录请求不接受额外字段；Turnstile token 只服务密码登录前置校验，不参与 Passkey/MFA 二阶段。 */
 export const loginBodySchema = z.object({
   email: z.email().max(254),
   password: z.string().min(1).max(72),
+  turnstileToken: z.string().trim().min(1).max(2048).optional(),
 }).strict();
 
 export const mfaStatusPayloadSchema = z.object({
@@ -108,7 +108,7 @@ export type MfaRecoveryCodesResponse = SessionResponse & {
   recoveryCodes: string[];
 };
 
-// 启用/重建恢复码属于账号安全状态切换：响应必须同时续签产品 session，避免旧 bearer 被废弃后前端掉登录。
+// 启用/重建恢复码属于账号安全状态切换：响应必须同时续签产品 session，避免旧 cookie session 被废弃后前端掉登录。
 export const mfaRecoveryCodesPayloadSchema = sessionPayloadSchema.extend({
   recoveryCodes: z.array(z.string().min(1)).min(1),
 }).strict() satisfies z.ZodType<MfaRecoveryCodesResponse>;

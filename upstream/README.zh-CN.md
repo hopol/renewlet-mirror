@@ -38,11 +38,12 @@ Renewlet 是一个自托管订阅账本，用来记录周期扣费并发送续�
 - 订阅记录：扣费周期、状态、标签、网站、备注、Logo、分类和付款方式。
 - 续费提醒：按用户 IANA 时区、本地提醒时间、提前天数、重复提醒、发送历史和失败重试生成任务。
 - 通知渠道：Telegram、Notifyx、Webhook、企业微信机器人、钉钉机器人、SMTP 邮件、Bark、Server酱、Discord 和 PushPlus。
-- 账户安全：身份验证器验证码、一次性恢复码和通行密钥登录。
+- 账户安全：身份验证器验证码、一次性恢复码和通行密钥登录；访问安全：可选 Cloudflare Turnstile 登录人机验证。
 - 支出统计：月/年成本折算、预算使用、分类图表、付款方式图表和停用订阅节省。
 - AI 识别：从账单截图、备忘录、CSV/TSV 或表格文本生成订阅草稿，确认后再导入。
 - 日历订阅：全局私有 ICS Feed 和单个订阅 Feed。
 - 公开订阅状态页：按订阅控制是否公开，并可选择是否展示金额。
+- 只读 [Public API](docs/public-api.md)：提供 OpenAPI 3.1 文档，方便 CLI、Shortcuts 和自动化平台接入。
 - 数据迁移：导入导出 Renewlet 数据，并支持 Wallos 文件迁入。
 - Logo 来源：上传 Logo、图片链接、内置图标来源和 favicon 候选。
 - Docker 部署：React、Go/PocketBase、SQLite 和静态资源运行在同一个容器中。
@@ -70,7 +71,7 @@ http://localhost:3000/setup
 生产环境固定到稳定版本：
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.2.95"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.2.98"#' .env
 docker compose pull
 docker compose up -d
 ```
@@ -78,7 +79,7 @@ docker compose up -d
 如果 Docker Hub 拉取不可用，改用 GHCR：
 
 ```env
-RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.2.95"
+RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.2.98"
 ```
 
 ## Cloudflare Workers
@@ -88,6 +89,14 @@ RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.2.95"
 可以使用部署按钮创建 Cloudflare 管理的仓库；也可以按 [Cloudflare Workers 部署](docs/cloudflare-workers-deploy.zh-CN.md) 自己管理 D1、R2、GitHub Actions 和 secrets。
 
 升级时不要重新点击部署按钮。一键部署用户在 Cloudflare Builds 连接的生成仓库里运行 `Sync Renewlet Upstream`；手动部署用户把自己的 fork 更新到 Renewlet 最新版本后运行 `Cloudflare Worker`。
+
+## 登录人机验证
+
+管理员可以在 **设置 -> 访问安全 -> Cloudflare Turnstile** 中启用 Turnstile 人机验证。它只在邮箱密码登录的密码校验前生效，不改变通行密钥登录、MFA 二阶段校验或首次初始化 setup。
+
+Turnstile 是站点级安全设置。Renewlet 只把公开 Site key 暴露给登录页；Secret key 只保存在服务端用于 Cloudflare Siteverify，不进入公开状态、导出、云备份或日志。Docker 和 Cloudflare 部署已经内置 `https://challenges.cloudflare.com` 所需的 CSP 放行。
+
+手动验收时建议使用 Cloudflare 官方 Turnstile 测试 Site key 和 Secret key，避免真实挑战干扰。
 
 ## 升级
 
@@ -100,7 +109,7 @@ tar -czf renewlet-backup-$(date +%F).tgz .env docker-compose.yml data
 使用 Docker Compose 升级：
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.2.95"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.2.98"#' .env
 docker compose pull
 docker compose up -d
 docker compose logs -f
@@ -126,7 +135,7 @@ docker compose down
 | `PB_ENCRYPTION_KEY` | PocketBase 敏感设置加密密钥，部署后不要随意更换。 |
 | `CRON_SECRET` | 外部 Cron 调用 `/api/cron/notifications` 时使用的 Bearer 密钥。 |
 | `RENEWLET_DEMO_MODE` | Docker Demo Mode 开关，默认 `false`。 |
-| `RENEWLET_CUSTOM_HEAD_SCRIPT` | 可选部署者自备外链 `<script>` 注入。默认留空；留空时不注入任何外部脚本。 |
+| `RENEWLET_CUSTOM_HEAD_SCRIPT` | 可选部署者自备外链 `<script>` 注入。默认留空；只建议使用可信自托管 HTTPS 脚本，因为它会运行在 Renewlet 页面内。 |
 | `NOTIFICATION_SCHEDULER_ENABLED` | 内置通知调度器开关，默认 `true`。 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 可选 Docker/Go 上游 HTTP 代理；也支持小写变量名。 |
 
@@ -159,6 +168,8 @@ RENEWLET_CUSTOM_HEAD_SCRIPT='<script defer src="https://cdn.example.com/widget.j
 ```
 
 Renewlet 只接受单个带 `src`、无内联内容的外链 script。脚本 origin 会自动加入 `script-src` 和 `connect-src`；如果提供 `data-host-url`，该 origin 也会加入 `connect-src`。
+
+请把这个配置视为高信任部署边界。注入脚本和 Renewlet 运行在同一个浏览器页面中。它读不到 HttpOnly session cookie，但同源脚本仍可读取 CSRF cookie，并以当前浏览器 session 发起带凭据请求。优先使用你完全控制的自托管 HTTPS 脚本；不需要时保持 `RENEWLET_CUSTOM_HEAD_SCRIPT` 为空。
 
 Docker/Go 部署在运行时注入，修改环境变量后只需重启 Renewlet。Cloudflare Static Assets 在构建时读取该变量并注入，修改后需要重新构建和部署。
 

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { subscriptionNormalizationFixtures } from "@renewlet/shared/contract-fixtures";
+import { isValidDateOnly, type DateOnly } from "@renewlet/shared/runtime";
 import { readSuccessData } from "./api-test-helpers";
 import { toApiSubscription } from "./db";
 import { normalizeSubscriptionBodyForStorage, readSubscriptions, toSubscriptionRow, updateSubscription, type SubscriptionBody } from "./subscriptions";
@@ -18,11 +19,16 @@ vi.mock("./auth", () => ({
 
 const USER_ID = "usr_subscription_owner";
 
+function dateOnly(value: string): DateOnly {
+  if (!isValidDateOnly(value)) throw new Error(`Invalid test date: ${value}`);
+  return value as DateOnly;
+}
+
 function subscriptionBody(overrides: Partial<SubscriptionBody> = {}): SubscriptionBody {
   return {
     name: "Three Year Plan",
     logo: null,
-    price: 360,
+    price: "360",
     currency: "USD",
     billingCycle: "monthly",
     customDays: null,
@@ -57,7 +63,6 @@ describe("Cloudflare subscription mapper", () => {
     authMocks.requireAuth.mockResolvedValue({
       user: { id: USER_ID },
       session: { id: "ses" },
-      token: "test",
     });
   });
 
@@ -217,19 +222,72 @@ describe("Cloudflare subscription mapper", () => {
     const costSharing = {
       enabled: true,
       splitMode: "custom" as const,
+      collectionReminder: { enabled: true, reminderDays: -1 },
       members: [
-        { id: "partner", name: "Partner", currency: "USD", customAmount: 40 },
-        { id: "child", name: "Child", currency: "USD", customAmount: 60 },
+        { id: "partner", name: "Partner", currency: "USD", customAmount: "40", joinedDate: dateOnly("2026-05-08") },
+        { id: "child", name: "Child", currency: "USD", customAmount: "60", joinedDate: dateOnly("2026-05-08") },
       ],
     };
     const row = toSubscriptionRow("sub_shared", "usr_custom", subscriptionBody({
-      price: 100,
+      price: "100",
+      startDate: "2026-05-08",
+      nextBillingDate: "2026-06-08",
       costSharing,
-    }), "2026-06-05T00:00:00.000Z", "2026-06-05T00:00:00.000Z");
+    }), "2026-06-05T00:00:00.000Z", "2026-06-05T00:00:00.000Z", {
+      settings: { timezone: "UTC", notificationReminderDays: 3 },
+      referenceDate: "2026-06-05",
+    });
 
     expect(row.cost_sharing_json).toBeDefined();
     expect(JSON.parse(row.cost_sharing_json ?? "{}")).toEqual(costSharing);
+    expect(row.cost_sharing_collection_reminder_enabled).toBe(1);
+    expect(row.cost_sharing_next_collection_reminder_date).toBe("2026-06-05");
     expect(toApiSubscription(row)).toMatchObject({ costSharing });
+  });
+
+  it("does not persist enabled collection reminders for one-time buyout rows", () => {
+    const costSharing = {
+      enabled: true,
+      splitMode: "equal" as const,
+      collectionReminder: { enabled: true, reminderDays: -1 },
+      members: [{ id: "partner", name: "Partner", currency: "USD", joinedDate: dateOnly("2026-05-08") }],
+    };
+
+    expect(() => normalizeSubscriptionBodyForStorage(subscriptionBody({
+      billingCycle: "one-time",
+      autoCalculateNextBillingDate: false,
+      oneTimeTermCount: null,
+      oneTimeTermUnit: null,
+      costSharing,
+    }))).toThrow();
+
+    const buyoutRow = toSubscriptionRow("sub_buyout", "usr_custom", subscriptionBody({
+      billingCycle: "one-time",
+      autoCalculateNextBillingDate: false,
+      oneTimeTermCount: null,
+      oneTimeTermUnit: null,
+      costSharing,
+    }), "2026-06-05T00:00:00.000Z", "2026-06-05T00:00:00.000Z", {
+      settings: { timezone: "UTC", notificationReminderDays: 3 },
+      referenceDate: "2026-06-05",
+    });
+    const fixedTermRow = toSubscriptionRow("sub_fixed_term", "usr_custom", subscriptionBody({
+      billingCycle: "one-time",
+      autoCalculateNextBillingDate: false,
+      startDate: "2026-05-08",
+      nextBillingDate: "2026-06-08",
+      oneTimeTermCount: 1,
+      oneTimeTermUnit: "month",
+      costSharing,
+    }), "2026-06-05T00:00:00.000Z", "2026-06-05T00:00:00.000Z", {
+      settings: { timezone: "UTC", notificationReminderDays: 3 },
+      referenceDate: "2026-06-05",
+    });
+
+    expect(buyoutRow.cost_sharing_collection_reminder_enabled).toBe(0);
+    expect(buyoutRow.cost_sharing_next_collection_reminder_date).toBeNull();
+    expect(fixedTermRow.cost_sharing_collection_reminder_enabled).toBe(1);
+    expect(fixedTermRow.cost_sharing_next_collection_reminder_date).toBe("2026-06-05");
   });
 
   it("normalizes dirty tags_json while applying a subscription PATCH", async () => {
@@ -254,8 +312,8 @@ describe("Cloudflare subscription mapper", () => {
                   return { success: true, meta: {}, results: [existing] as T[] } as D1Result<T>;
                 }
                 return { success: true, meta: {}, results: [] as T[] } as D1Result<T>;
-              },
-              run: async () => {
+            },
+            run: async () => {
               if (sql.includes("UPDATE subscriptions SET")) {
                 updateValues = values;
               }
@@ -353,6 +411,19 @@ describe("Cloudflare subscription mapper", () => {
         prepare: (sql: string) => ({
           bind: (...values: unknown[]) => ({
             first: async <T>() => {
+              if (sql.includes("COUNT(*) AS count") && sql.includes("MAX(updated_at)") && sql.includes("FROM subscriptions")) {
+                const rows = [target, ownerMismatch, foreign].filter((row) => row.user_id === values[0]);
+                return {
+                  count: rows.length,
+                  source_updated_at: rows.reduce((max, row) => row.updated_at > max ? row.updated_at : max, ""),
+                } as T;
+              }
+              if (sql.includes("COUNT(*) AS count FROM subscription_list_index")) {
+                return { count: indexRows.filter((row) => row.user_id === values[0]).length } as T;
+              }
+              if (sql.includes("FROM subscription_user_stats")) {
+                return { total_count: 2, status_counts_json: JSON.stringify({ active: 2 }), source_updated_at: target.updated_at, created_at: "", updated_at: "" } as T;
+              }
               if (sql.includes("FROM settings")) {
                 return { settings_json: JSON.stringify({ ...subscriptionBody(), timezone: "UTC" }) } as T;
               }
@@ -417,6 +488,187 @@ describe("Cloudflare subscription mapper", () => {
     expect(scans[1]?.sql).toContain("FROM subscriptions");
   });
 
+  it("rebuilds missing D1 list projection before filtered reads", async () => {
+    const target = toSubscriptionRow("sub_projection_drift", USER_ID, subscriptionBody({
+      name: "Projection Drift Plan",
+      tags: ["Projection"],
+      website: "https://projection.example.com",
+    }), "2026-06-08T00:00:00.000Z", "2026-06-08T00:00:00.000Z");
+    const toIndexRow = (row: SubscriptionRow): SubscriptionListIndexRow => ({
+      subscription_id: row.id,
+      user_id: row.user_id,
+      name: row.name,
+      website: row.website,
+      notes: row.notes,
+      search_text_lower: [row.name, row.website ?? "", row.notes ?? "", ...JSON.parse(row.tags_json)].join("\n").toLowerCase(),
+      category: row.category,
+      billing_cycle: row.billing_cycle,
+      currency: row.currency,
+      payment_method: row.payment_method,
+      status: row.status,
+      pinned: row.pinned,
+      public_hidden: row.public_hidden,
+      next_billing_date: row.next_billing_date,
+      trial_end_date: row.trial_end_date,
+      one_time_term_count: row.one_time_term_count,
+      auto_renew: row.auto_renew,
+      reminder_days: row.reminder_days,
+      repeat_reminder_enabled: row.repeat_reminder_enabled,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    });
+    let projectionRows: SubscriptionListIndexRow[] = [];
+    let batchCalled = false;
+    const env = {
+      DB: {
+        prepare: (sql: string) => ({
+          bind: (...values: unknown[]) => ({
+            first: async <T>() => {
+              if (sql.includes("COUNT(*) AS count") && sql.includes("MAX(updated_at)") && sql.includes("FROM subscriptions")) {
+                return { count: 1, source_updated_at: target.updated_at } as T;
+              }
+              if (sql.includes("COUNT(*) AS count FROM subscription_list_index")) return { count: projectionRows.length } as T;
+              if (sql.includes("FROM subscription_user_stats")) {
+                return { total_count: 1, status_counts_json: JSON.stringify({ active: 1 }), source_updated_at: target.updated_at, created_at: "", updated_at: "" } as T;
+              }
+              if (sql.includes("FROM settings")) {
+                return { settings_json: JSON.stringify({ ...subscriptionBody(), timezone: "UTC" }) } as T;
+              }
+              return null;
+            },
+            all: async <T>() => {
+              if (sql.includes("FROM subscription_list_index")) {
+                return { success: true, meta: {}, results: projectionRows as T[] } as D1Result<T>;
+              }
+              if (sql.includes("FROM subscriptions")) {
+                const ids = new Set(values.slice(1));
+                const results = sql.includes("id IN")
+                  ? [target].filter((row) => row.user_id === values[0] && ids.has(row.id))
+                  : [target].filter((row) => row.user_id === values[0]);
+                return { success: true, meta: {}, results: results as T[] } as D1Result<T>;
+              }
+              return { success: true, meta: {}, results: [] as T[] } as D1Result<T>;
+            },
+            run: async () => ({ success: true, meta: { changes: 1 }, results: [] }) as unknown as D1Result,
+          }),
+        }),
+        batch: async (statements: D1PreparedStatement[]) => {
+          batchCalled = true;
+          projectionRows = [toIndexRow(target)];
+          return statements.map(() => ({ success: true, meta: { changes: 1 }, results: [] }) as unknown as D1Result);
+        },
+      } as unknown as D1Database,
+      ASSETS: {} as Fetcher,
+      ASSETS_BUCKET: {} as R2Bucket,
+    } satisfies Env;
+
+    const response = await readSubscriptions(new Request("https://renewlet.test/api/app/subscriptions?q=projection&limit=10", {
+      headers: { authorization: "Bearer test" },
+    }), env);
+    const body = await readSuccessData<{ subscriptions: Array<{ id: string }>; total: number }>(response);
+
+    expect(batchCalled).toBe(true);
+    expect(body.total).toBe(1);
+    expect(body.subscriptions.map((item) => item.id)).toEqual([target.id]);
+  });
+
+  it("rebuilds stale D1 list projection when source updated_at changes without a count change", async () => {
+    const staleTarget = toSubscriptionRow("sub_projection_stale", USER_ID, subscriptionBody({
+      name: "Old Projection Plan",
+      tags: ["Old"],
+      website: "https://old.example.com",
+    }), "2026-06-08T00:00:00.000Z", "2026-06-08T00:00:00.000Z");
+    const freshTarget = {
+      ...staleTarget,
+      name: "Fresh Projection Plan",
+      tags_json: JSON.stringify(["Fresh"]),
+      website: "https://fresh.example.com",
+      updated_at: "2026-06-09T00:00:00.000Z",
+    };
+    const toIndexRow = (row: SubscriptionRow): SubscriptionListIndexRow => ({
+      subscription_id: row.id,
+      user_id: row.user_id,
+      name: row.name,
+      website: row.website,
+      notes: row.notes,
+      search_text_lower: [row.name, row.website ?? "", row.notes ?? "", ...JSON.parse(row.tags_json)].join("\n").toLowerCase(),
+      category: row.category,
+      billing_cycle: row.billing_cycle,
+      currency: row.currency,
+      payment_method: row.payment_method,
+      status: row.status,
+      pinned: row.pinned,
+      public_hidden: row.public_hidden,
+      next_billing_date: row.next_billing_date,
+      trial_end_date: row.trial_end_date,
+      one_time_term_count: row.one_time_term_count,
+      auto_renew: row.auto_renew,
+      reminder_days: row.reminder_days,
+      repeat_reminder_enabled: row.repeat_reminder_enabled,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    });
+    let projectionRows: SubscriptionListIndexRow[] = [toIndexRow(staleTarget)];
+    let batchCalled = false;
+    const env = {
+      DB: {
+        prepare: (sql: string) => ({
+          bind: (...values: unknown[]) => ({
+            first: async <T>() => {
+              if (sql.includes("COUNT(*) AS count") && sql.includes("MAX(updated_at)") && sql.includes("FROM subscriptions")) {
+                return { count: 1, source_updated_at: freshTarget.updated_at } as T;
+              }
+              if (sql.includes("COUNT(*) AS count FROM subscription_list_index")) return { count: projectionRows.length } as T;
+              if (sql.includes("FROM subscription_user_stats")) {
+                return {
+                  total_count: 1,
+                  status_counts_json: JSON.stringify({ active: 1 }),
+                  source_updated_at: staleTarget.updated_at,
+                  created_at: "",
+                  updated_at: "",
+                } as T;
+              }
+              if (sql.includes("FROM settings")) {
+                return { settings_json: JSON.stringify({ ...subscriptionBody(), timezone: "UTC" }) } as T;
+              }
+              return null;
+            },
+            all: async <T>() => {
+              if (sql.includes("FROM subscription_list_index")) {
+                return { success: true, meta: {}, results: projectionRows as T[] } as D1Result<T>;
+              }
+              if (sql.includes("FROM subscriptions")) {
+                const ids = new Set(values.slice(1));
+                const results = sql.includes("id IN")
+                  ? [freshTarget].filter((row) => row.user_id === values[0] && ids.has(row.id))
+                  : [freshTarget].filter((row) => row.user_id === values[0]);
+                return { success: true, meta: {}, results: results as T[] } as D1Result<T>;
+              }
+              return { success: true, meta: {}, results: [] as T[] } as D1Result<T>;
+            },
+            run: async () => ({ success: true, meta: { changes: 1 }, results: [] }) as unknown as D1Result,
+          }),
+        }),
+        batch: async (statements: D1PreparedStatement[]) => {
+          batchCalled = true;
+          projectionRows = [toIndexRow(freshTarget)];
+          return statements.map(() => ({ success: true, meta: { changes: 1 }, results: [] }) as unknown as D1Result);
+        },
+      } as unknown as D1Database,
+      ASSETS: {} as Fetcher,
+      ASSETS_BUCKET: {} as R2Bucket,
+    } satisfies Env;
+
+    const response = await readSubscriptions(new Request("https://renewlet.test/api/app/subscriptions?q=fresh&limit=10", {
+      headers: { authorization: "Bearer test" },
+    }), env);
+    const body = await readSuccessData<{ subscriptions: Array<{ id: string; name: string }>; total: number }>(response);
+
+    expect(batchCalled).toBe(true);
+    expect(body.total).toBe(1);
+    expect(body.subscriptions.map((item) => ({ id: item.id, name: item.name }))).toEqual([{ id: freshTarget.id, name: freshTarget.name }]);
+  });
+
   it("clears one-time term fields for recurring subscriptions", () => {
     const row = toSubscriptionRow("sub_monthly", "usr_custom", subscriptionBody({
       billingCycle: "monthly",
@@ -446,6 +698,8 @@ describe("Cloudflare subscription mapper", () => {
     const costSharingCurrentUserPayerMigration = readFileSync(resolve("migrations/0019_subscription_cost_sharing_current_user_payer.sql"), "utf8");
     const nullableStartDateMigration = readFileSync(resolve("migrations/0024_nullable_subscription_start_date.sql"), "utf8");
     const filterIndexesMigration = readFileSync(resolve("migrations/0026_subscription_filter_indexes.sql"), "utf8");
+    const statsSourceMigration = readFileSync(resolve("migrations/0031_subscription_stats_source_updated_at.sql"), "utf8");
+    const costSharingCollectionReminderMigration = readFileSync(resolve("migrations/0034_cost_sharing_collection_reminders.sql"), "utf8");
 
     expect(initialMigration).not.toContain("custom_cycle_unit");
     expect(initialMigration).not.toContain("one_time_term");
@@ -453,6 +707,7 @@ describe("Cloudflare subscription mapper", () => {
     expect(initialMigration).not.toContain("public_status_pages");
     expect(initialMigration).not.toContain("auto_renew");
     expect(initialMigration).not.toContain("cost_sharing_json");
+    expect(initialMigration).not.toContain("cost_sharing_collection_reminder");
     expect(customUnitMigration.trim()).toBe("ALTER TABLE subscriptions ADD COLUMN custom_cycle_unit TEXT;");
     expect(oneTimeTermMigration.trim()).toBe([
       "ALTER TABLE subscriptions ADD COLUMN one_time_term_count INTEGER;",
@@ -498,5 +753,14 @@ describe("Cloudflare subscription mapper", () => {
     expect(filterIndexesMigration).toContain("idx_subscriptions_user_public_hidden_order");
     expect(filterIndexesMigration).toContain("idx_subscriptions_user_reminder_mode_order");
     expect(filterIndexesMigration).toContain("idx_subscriptions_user_repeat_reminder_order");
+    expect(statsSourceMigration).toContain("ALTER TABLE subscription_user_stats ADD COLUMN source_updated_at TEXT NOT NULL DEFAULT '';");
+    expect(costSharingCollectionReminderMigration).toContain("ALTER TABLE subscriptions ADD COLUMN cost_sharing_collection_reminder_enabled INTEGER NOT NULL DEFAULT 0;");
+    expect(costSharingCollectionReminderMigration).toContain("ALTER TABLE subscriptions ADD COLUMN cost_sharing_next_collection_reminder_date TEXT;");
+    expect(costSharingCollectionReminderMigration).toContain("json_remove(cost_sharing_json, '$.collectionReminder.intervalMonths')");
+    expect(costSharingCollectionReminderMigration).toContain("cost_sharing_next_collection_reminder_date = CASE");
+    expect(costSharingCollectionReminderMigration).toContain("AND (billing_cycle != 'one-time' OR one_time_term_count IS NOT NULL)");
+    expect(costSharingCollectionReminderMigration).toContain("CREATE INDEX IF NOT EXISTS idx_subscriptions_user_cost_sharing_collection_due");
+    expect(costSharingCollectionReminderMigration).toContain("idx_subscriptions_user_reminder_date_due");
+    expect(costSharingCollectionReminderMigration).toContain("idx_subscriptions_user_trial_reminder_date_due");
   });
 });

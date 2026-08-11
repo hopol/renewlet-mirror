@@ -7,9 +7,10 @@
  */
 import { DEFAULT_LOCALE, type Locale } from "@/i18n/locales";
 import { toMonthlyAmount } from "@/lib/subscription-billing";
-import { compareDateOnly, type DateOnly } from "@/lib/time/date-only";
+import { assertDateOnly, compareDateOnly, type DateOnly } from "@/lib/time/date-only";
 import type { SubscriptionListFilters } from "@/services/subscription-service";
 import type { BillingCycle, Category, Subscription, SubscriptionStatus } from "@/types/subscription";
+import { compareMoney } from "@renewlet/shared/money";
 import { SUBSCRIPTION_PAYMENT_METHOD_NONE } from "@renewlet/shared/schemas/subscriptions";
 import { getEffectiveSubscriptionStatus } from "./subscription-status";
 
@@ -75,7 +76,7 @@ export type SubscriptionRenewalFilter = (typeof SUBSCRIPTION_RENEWAL_FILTERS)[nu
 export interface SubscriptionSortContext {
   sortOption: SubscriptionSortOption;
   defaultCurrency: string;
-  convert: (amount: number, from: string, to: string) => number;
+  convert: (amount: number | string, from: string, to: string) => number;
   locale?: Locale;
 }
 
@@ -151,7 +152,7 @@ function getSortDirection(sortOption: SubscriptionSortOption): 1 | -1 {
 function calculateMonthlyCost(
   subscription: Subscription,
   defaultCurrency: string,
-  convert: (amount: number, from: string, to: string) => number,
+  convert: (amount: number | string, from: string, to: string) => number,
 ): number {
   const amountInDefault = convert(subscription.price, subscription.currency, defaultCurrency);
   return toMonthlyAmount(
@@ -207,7 +208,7 @@ export function sortSubscriptions(
           break;
         case "price_asc":
         case "price_desc":
-          comparison = left.subscription.price - right.subscription.price;
+          comparison = compareMoney(left.subscription.price, right.subscription.price);
           break;
         case "name_asc":
         case "name_desc":
@@ -275,8 +276,8 @@ export function buildSubscriptionListFilters(
   if (advancedFilters.selectedBillingCycles.length > 0) query.billingCycle = advancedFilters.selectedBillingCycles;
   if (advancedFilters.selectedPaymentMethods.length > 0) query.paymentMethod = advancedFilters.selectedPaymentMethods;
   if (advancedFilters.selectedCurrencies.length > 0) query.currency = advancedFilters.selectedCurrencies;
-  if (advancedFilters.nextBillingFrom) query.nextBillingFrom = advancedFilters.nextBillingFrom;
-  if (advancedFilters.nextBillingTo) query.nextBillingTo = advancedFilters.nextBillingTo;
+  if (advancedFilters.nextBillingFrom) query.nextBillingFrom = assertDateOnly(advancedFilters.nextBillingFrom);
+  if (advancedFilters.nextBillingTo) query.nextBillingTo = assertDateOnly(advancedFilters.nextBillingTo);
   const pinned = booleanFilterToQuery(advancedFilters.pinnedFilter);
   if (pinned !== undefined) query.pinned = pinned;
   const publicHidden = booleanFilterToQuery(advancedFilters.publicHiddenFilter);

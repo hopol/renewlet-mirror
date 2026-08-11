@@ -21,7 +21,7 @@ import (
 )
 
 func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
-	api := router.Group("").BindFunc(apiErrorMiddleware)
+	api := router.Group("").BindFunc(apiErrorMiddleware).BindFunc(appSameOriginUnsafeMiddleware)
 
 	// 公共状态接口不要求认证，但响应仍使用命名 struct，避免前端在登录前信任松散 JSON。
 	api.GET("/api/app/health", func(e *core.RequestEvent) error {
@@ -36,11 +36,16 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 	})
 
 	api.GET("/api/app/status", func(e *core.RequestEvent) error {
+		turnstile, err := publicTurnstileConfig(app)
+		if err != nil {
+			return e.InternalServerError(serverText(requestLocale(e.Request), "common.internalError"), err)
+		}
 		// app status 是认证前 capability 源；前端置灰和 setup 可见性都只读这一处，不再从页面里猜部署模式。
 		return apiSuccessJSON(e, http.StatusOK, appStatusResponse{
 			SetupRequired: !hasEnabledAdmin(app),
 			SetupEnabled:  demoModePolicy.SetupEnabled(),
 			DemoMode:      demoModePolicy.Enabled(),
+			Turnstile:     turnstile,
 		})
 	})
 	api.GET("/api/app/setup", func(e *core.RequestEvent) error {
@@ -93,6 +98,10 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 	})
 
 	admin := api.Group("/api/app/admin").Bind(appAuthMiddleware(app)).BindFunc(requireAdmin)
+	// 访问安全是站点级管理员策略；不要挂到账号 settings route，避免 secret 进入用户导出/备份链路。
+	admin.GET("/auth-security", func(e *core.RequestEvent) error { return handleAuthSecurityRead(app, e) })
+	admin.PUT("/auth-security", func(e *core.RequestEvent) error { return handleAuthSecurityUpdate(app, e) })
+	admin.POST("/auth-security/turnstile/test", func(e *core.RequestEvent) error { return handleAuthSecurityTurnstileTest(app, e) })
 	admin.GET("/users", func(e *core.RequestEvent) error {
 		locale := requestLocale(e.Request)
 		users, err := app.FindAllRecords("users")
@@ -289,12 +298,12 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 		if err := app.Save(e.Auth); err != nil {
 			return e.BadRequestError(serverText(locale, "auth.passwordUpdateFailed"), err)
 		}
-		_, currentSession, _ := appAuthRecordByToken(app, bearerTokenFromHeader(e.Request.Header.Get("Authorization")))
+		_, currentSession, _ := appAuthRecordByToken(app, sessionTokenFromRequest(e.Request))
 		keepSessionID := ""
 		if currentSession != nil {
 			keepSessionID = currentSession.Id
 		}
-		// 改密后保留当前产品 session，踢掉其它设备；账号安全自助操作会另行续签当前 session 并废弃旧 bearer。
+		// 改密后保留当前产品 session，踢掉其它设备；账号安全自助操作会另行续签当前 cookie session。
 		if err := deleteAppSessionsForUserExcept(app, e.Auth.Id, keepSessionID); err != nil {
 			return e.InternalServerError(serverText(locale, "common.internalError"), err)
 		}
@@ -339,6 +348,9 @@ func registerRoutes(app core.App, router *router.Router[*core.RequestEvent]) {
 	auth.PUT("/settings", func(e *core.RequestEvent) error { return handleSettingsUpdate(app, e) })
 	auth.GET("/custom-config", func(e *core.RequestEvent) error { return handleCustomConfigRead(app, e) })
 	auth.PUT("/custom-config", func(e *core.RequestEvent) error { return handleCustomConfigUpdate(app, e) })
+	// 汇率快照是登录态报表口径 API；Public API token 不读取也不能写入这组用户级私有报表状态。
+	auth.GET("/exchange-rate-snapshots", func(e *core.RequestEvent) error { return handleExchangeRateSnapshotsList(app, e) })
+	auth.PUT("/exchange-rate-snapshots/{month}", func(e *core.RequestEvent) error { return handleExchangeRateSnapshotPut(app, e) })
 	auth.GET("/subscriptions", func(e *core.RequestEvent) error { return handleSubscriptionsList(app, e) })
 	auth.POST("/subscriptions", func(e *core.RequestEvent) error { return handleSubscriptionCreate(app, e) })
 	auth.PATCH("/subscriptions/{id}", func(e *core.RequestEvent) error { return handleSubscriptionUpdate(app, e) })

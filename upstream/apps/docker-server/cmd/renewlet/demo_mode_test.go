@@ -32,11 +32,11 @@ func newDemoModeTestApp(t *testing.T) (core.App, *core.Record, string) {
 	if user == nil {
 		t.Fatal("expected demo user to be created")
 	}
-	token, _, err := createAppSession(app, user.Id)
+	token, csrfToken, _, err := createAppSession(app, user.Id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return app, user, "Bearer " + token
+	return app, user, routeTestProductSessionAuth(token, csrfToken)
 }
 
 func countUserRecords(t *testing.T, app core.App, collection string, userID string) int64 {
@@ -245,6 +245,17 @@ func TestDemoModeCreatesRepairsSeedsAndDisablesSetup(t *testing.T) {
 	if got := countUserRecords(t, app, "settings", demo.Id); got != 1 {
 		t.Fatalf("expected one demo settings row, got %d", got)
 	}
+	settingsRecord, err := app.FindFirstRecordByFilter("settings", "user = {:user}", dbx.Params{"user": demo.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	demoSettings := settingsFromRecord(settingsRecord)
+	if !demoSettings.SubscriptionPriceReferenceEnabled || demoSettings.SubscriptionPriceReferenceCurrency != "CNY" {
+		t.Fatalf("expected demo subscription price reference to default to CNY, got enabled=%v currency=%q", demoSettings.SubscriptionPriceReferenceEnabled, demoSettings.SubscriptionPriceReferenceCurrency)
+	}
+	if len(demoSettings.EnabledChannels) != 0 {
+		t.Fatalf("expected demo settings not to enable notification channels, got %#v", demoSettings.EnabledChannels)
+	}
 	if got := countUserRecords(t, app, "custom_configs", demo.Id); got != 0 {
 		t.Fatalf("expected demo reset not to seed custom config rows, got %d", got)
 	}
@@ -379,7 +390,7 @@ func assertPersistedDemoDeveloperSubscriptions(t *testing.T, app core.App, userI
 		if !ok {
 			t.Fatalf("%s persisted demo extra missing price snapshot: %#v", name, extra)
 		}
-		amount, amountOK := snapshot["amount"].(float64)
+		amount, amountOK := snapshot["amount"].(string)
 		if !amountOK || amount != expected.Price || snapshot["currency"] != expected.Currency || snapshot["billingCycle"] != expected.BillingCycle || snapshot["planLabel"] != expected.PlanLabel || snapshot["basis"] != expected.PriceBasis {
 			t.Fatalf("%s persisted price snapshot mismatch: %#v", name, snapshot)
 		}
@@ -403,7 +414,7 @@ func TestDemoModeAllowsNormalSettingsButProtectsExternalIntegrationSettings(t *t
 	app, demo, token := newDemoModeTestApp(t)
 
 	// 普通展示设置允许保存，外部通知/AI/备份凭据必须禁止，避免公开演示触发真实第三方调用。
-	normal := serveTestRequest(t, app, http.MethodPut, "/api/app/settings", `{"themeMode":"light","monthlyBudget":123}`, token)
+	normal := serveTestRequest(t, app, http.MethodPut, "/api/app/settings", `{"themeMode":"light","monthlyBudget":"123"}`, token)
 	if normal.Code != http.StatusOK {
 		t.Fatalf("expected ordinary settings save to succeed, got %d: %s", normal.Code, normal.Body.String())
 	}
@@ -412,7 +423,7 @@ func TestDemoModeAllowsNormalSettingsButProtectsExternalIntegrationSettings(t *t
 		t.Fatal(err)
 	}
 	settings := settingsFromRecord(settingsRecord)
-	if settings.ThemeMode != "light" || settings.MonthlyBudget != 123 {
+	if settings.ThemeMode != "light" || settings.MonthlyBudget != "123" {
 		t.Fatalf("ordinary settings were not persisted: %#v", settings)
 	}
 

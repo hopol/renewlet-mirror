@@ -45,7 +45,8 @@ const mocks = vi.hoisted(() => ({
   deleteTelegramBotCommandsIsPending: false,
   isCloudflareRuntime: false,
   accountIdentity: { email: "alice@example.com" as string | null, role: "admin", banned: false },
-  appStatus: { setupRequired: false, setupEnabled: true, demoMode: false, isLoading: false },
+  appStatus: { setupRequired: false, setupEnabled: true, demoMode: false, turnstile: { enabled: false, siteKey: "" }, isLoading: false },
+  authSecurityController: { canManage: true, disabled: false, isLoading: false, isSaving: false, isClearingSecret: false, isTesting: false, secretConfigured: false, hasChanges: false, draft: { enabled: false, siteKey: "", secret: "" }, testDialogOpen: false, testDialogSiteKey: "", testResetSignal: 0, testError: undefined, setEnabled: vi.fn(), setSiteKey: vi.fn(), setSecret: vi.fn(), discard: vi.fn(), save: vi.fn(), clearSecret: vi.fn(), startTest: vi.fn(), handleTestDialogOpenChange: vi.fn(), handleTestTokenChange: vi.fn() },
 }));
 
 vi.mock("@/hooks/use-toast", () => ({
@@ -61,14 +62,19 @@ vi.mock("@/hooks/use-setup-status", () => ({
   useSetupStatus: () => mocks.appStatus,
 }));
 
-vi.mock("@/hooks/use-exchange-rates", () => ({
-  useExchangeRates: () => ({
+vi.mock("./use-auth-security-settings-controller", () => ({
+  useAuthSecuritySettingsController: () => mocks.authSecurityController,
+}));
+
+vi.mock("@/hooks/use-report-exchange-rates", () => ({
+  useReportExchangeRates: () => ({
     rates: {},
     activeProvider: "floatrates",
     loading: false,
     lastUpdated: null,
     refresh: mocks.refreshRates,
     error: null,
+    reportBasisStatus: { month: "2026-08", locked: true, sourceDate: "2026-08-01", capturedAt: "2026-08-06T00:00:00Z" },
     getCurrencySymbol: () => "¥",
   }),
 }));
@@ -214,7 +220,7 @@ describe("useSettingsFormController monthly budget input", () => {
     mocks.telegramBotCommands = { data: undefined, isLoading: false, refetch: vi.fn().mockResolvedValue(undefined) };
     mocks.isCloudflareRuntime = false;
     mocks.accountIdentity = { email: "alice@example.com", role: "admin", banned: false };
-    mocks.appStatus = { setupRequired: false, setupEnabled: true, demoMode: false, isLoading: false };
+    mocks.appStatus = { setupRequired: false, setupEnabled: true, demoMode: false, turnstile: { enabled: false, siteKey: "" }, isLoading: false };
     mocks.updateSettingsMutateAsync.mockImplementation(async (settings: AppSettings) => settings);
     mocks.saveConfig.mockImplementation(async (config: CustomConfig) => config);
     mocks.refreshRates.mockResolvedValue(undefined);
@@ -255,14 +261,14 @@ describe("useSettingsFormController monthly budget input", () => {
       result.current.handleMonthlyBudgetInputChange("0");
     });
     expect(result.current.monthlyBudgetInput).toBe("0");
-    expect(result.current.settings.monthlyBudget).toBe(0);
+    expect(result.current.settings.monthlyBudget).toBe("0");
     expect(result.current.monthlyBudgetError).toBeNull();
 
     act(() => {
       result.current.handleMonthlyBudgetInputChange("1000.5");
     });
     expect(result.current.monthlyBudgetInput).toBe("1000.5");
-    expect(result.current.settings.monthlyBudget).toBe(1000.5);
+    expect(result.current.settings.monthlyBudget).toBe("1000.5");
     expect(result.current.monthlyBudgetError).toBeNull();
   });
 
@@ -302,11 +308,11 @@ describe("useSettingsFormController monthly budget input", () => {
   it("syncs monthly budget input from remote settings while the form is clean", async () => {
     const { result, rerender } = renderHook(() => useSettingsFormController());
 
-    mocks.remoteSettings = { ...BASE_SETTINGS, monthlyBudget: 2500 };
+    mocks.remoteSettings = { ...BASE_SETTINGS, monthlyBudget: "2500" };
     rerender();
 
     await waitFor(() => {
-      expect(result.current.settings.monthlyBudget).toBe(2500);
+      expect(result.current.settings.monthlyBudget).toBe("2500");
     });
     expect(result.current.monthlyBudgetInput).toBe("2500");
     expect(result.current.hasUnsavedChanges).toBe(false);

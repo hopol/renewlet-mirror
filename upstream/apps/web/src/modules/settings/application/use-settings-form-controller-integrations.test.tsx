@@ -90,7 +90,8 @@ const mocks = vi.hoisted(() => ({
   openWindow: vi.fn(),
   isCloudflareRuntime: false,
   accountIdentity: { email: "alice@example.com" as string | null, role: "admin", banned: false },
-  appStatus: { setupRequired: false, setupEnabled: true, demoMode: false, isLoading: false },
+  appStatus: { setupRequired: false, setupEnabled: true, demoMode: false, turnstile: { enabled: false, siteKey: "" }, isLoading: false },
+  authSecurityController: { canManage: true, disabled: false, isLoading: false, isSaving: false, isClearingSecret: false, isTesting: false, secretConfigured: false, hasChanges: false, draft: { enabled: false, siteKey: "", secret: "" }, testDialogOpen: false, testDialogSiteKey: "", testResetSignal: 0, testError: undefined, setEnabled: vi.fn(), setSiteKey: vi.fn(), setSecret: vi.fn(), discard: vi.fn(), save: vi.fn(), clearSecret: vi.fn(), startTest: vi.fn(), handleTestDialogOpenChange: vi.fn(), handleTestTokenChange: vi.fn() },
 }));
 
 function checkedIconProviders(): BuiltInIconProvider[] {
@@ -116,14 +117,19 @@ vi.mock("@/hooks/use-setup-status", () => ({
   useSetupStatus: () => mocks.appStatus,
 }));
 
-vi.mock("@/hooks/use-exchange-rates", () => ({
-  useExchangeRates: () => ({
+vi.mock("./use-auth-security-settings-controller", () => ({
+  useAuthSecuritySettingsController: () => mocks.authSecurityController,
+}));
+
+vi.mock("@/hooks/use-report-exchange-rates", () => ({
+  useReportExchangeRates: () => ({
     rates: {},
     activeProvider: "floatrates",
     loading: false,
     lastUpdated: null,
     refresh: mocks.refreshRates,
     error: null,
+    reportBasisStatus: { month: "2026-08", locked: true, sourceDate: "2026-08-01", capturedAt: "2026-08-06T00:00:00Z" },
     getCurrencySymbol: (currency: string) => currency,
   }),
 }));
@@ -395,7 +401,7 @@ describe("useSettingsFormController integrations", () => {
     mocks.customConfig = DEFAULT_CUSTOM_CONFIG;
     mocks.isCloudflareRuntime = false;
     mocks.accountIdentity = { email: "alice@example.com", role: "admin", banned: false };
-    mocks.appStatus = { setupRequired: false, setupEnabled: true, demoMode: false, isLoading: false };
+    mocks.appStatus = { setupRequired: false, setupEnabled: true, demoMode: false, turnstile: { enabled: false, siteKey: "" }, isLoading: false };
     mocks.updateSettingsMutateAsync.mockImplementation(async (settings: AppSettings) => settings);
     mocks.saveConfig.mockImplementation(async (config: CustomConfig) => config);
     mocks.refreshRates.mockResolvedValue(undefined);
@@ -750,12 +756,10 @@ describe("useSettingsFormController integrations", () => {
 
     expect(result.current.publicStatusPage.enabled).toBe(false);
     expect(result.current.publicStatusPage.pageUrl).toBeNull();
-
     await act(async () => {
       await result.current.publicStatusPage.createOrRotate();
     });
     expect(mocks.createPublicStatusPageMutateAsync).toHaveBeenCalledTimes(1);
-
     mocks.publicStatusPageStatus = {
       data: {
         enabled: true,
@@ -766,22 +770,18 @@ describe("useSettingsFormController integrations", () => {
     };
     const { result: enabledResult } = renderHook(() => useSettingsFormController());
     expect(enabledResult.current.publicStatusPage.pageUrl).toBe("https://example.com/status/secret");
-
     await act(async () => {
       await enabledResult.current.publicStatusPage.copyUrl();
     });
     expect(mocks.writeClipboard).toHaveBeenCalledWith("https://example.com/status/secret");
-
     await act(async () => {
       await enabledResult.current.publicStatusPage.openPage();
     });
     expect(mocks.openWindow).toHaveBeenCalledWith("https://example.com/status/secret", "_blank", "noopener,noreferrer");
-
     await act(async () => {
       await enabledResult.current.publicStatusPage.updateShowPrices(true);
     });
     expect(mocks.updatePublicStatusPageMutateAsync).toHaveBeenCalledWith(true);
-
     await act(async () => {
       await enabledResult.current.publicStatusPage.regenerate();
     });

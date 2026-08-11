@@ -1,6 +1,6 @@
 // 共享邮件模板测试保护 Go/Worker 共同语义，避免两种运行面邮件正文和主题分叉。
 import { describe, expect, it } from "vitest";
-import { EMAIL_MAX_HTML_BYTES, buildNotificationEmail, type NotificationEmailMessage, type NotificationEmailSettings } from "./email-template";
+import { EMAIL_MAX_HTML_BYTES, buildNotificationEmail, type NotificationEmailItem, type NotificationEmailMessage, type NotificationEmailSettings } from "./email-template";
 
 function settings(overrides: Partial<NotificationEmailSettings> = {}): NotificationEmailSettings {
   return {
@@ -19,10 +19,10 @@ describe("buildNotificationEmail", () => {
       timestamp: "2026-05-14 08:00:00 Asia/Shanghai",
       hasPayload: true,
       items: [
-        item("renewal", "Renewal", 18, "CNY", "2026-05-17", 3),
-        item("expiry", "Fixed Term", 30, "CNY", "2026-05-18", 4),
-        item("trial", "Trial", 9.9, "USD", "2026-05-15", 1),
-        item("expired", "Expired", 12, "EUR", "2026-05-01", 7),
+        item("renewal", "Renewal", "18", "CNY", "2026-05-17", 3),
+        item("expiry", "Fixed Term", "30", "CNY", "2026-05-18", 4),
+        item("trial", "Trial", "9.9", "USD", "2026-05-15", 1),
+        item("expired", "Expired", "12", "EUR", "2026-05-01", 7),
       ],
     }, { appUrl: "https://renewlet.example/app/" });
 
@@ -94,7 +94,7 @@ describe("buildNotificationEmail", () => {
   });
 
   it("renders long reminder lists as compact ledger rows without item badges", () => {
-    const items = Array.from({ length: 43 }, (_, index) => item("renewal", `Ledger Subscription ${index + 1}`, index + 1, "CNY", "2026-05-17", 3));
+    const items = Array.from({ length: 43 }, (_, index) => item("renewal", `Ledger Subscription ${index + 1}`, String(index + 1), "CNY", "2026-05-17", 3));
     const email = buildNotificationEmail(settings(), {
       title: "Renewlet 订阅提醒",
       content: "即将续费：Renewlet",
@@ -118,6 +118,29 @@ describe("buildNotificationEmail", () => {
     expect(email.html).not.toContain("class=\"email-amount\"");
     expect(email.html).not.toContain("padding:4px 8px; border-radius:6px;");
     expect(email.html).not.toContain("email-card-bottom-safe-area");
+  });
+
+  it("renders cost sharing collection reminders with member payload amounts", () => {
+    const email = buildNotificationEmail(settings(), {
+      title: "Renewlet 订阅提醒",
+      content: "家庭共享收款：Family Plan",
+      timestamp: "2026-05-14 08:00:00 Asia/Shanghai",
+      hasPayload: true,
+      items: [{
+        ...item("costSharing", "Family Plan", "30", "USD", "2026-05-17", 3),
+        costSharing: {
+          memberName: "Partner",
+          amount: "10",
+          currency: "USD",
+        },
+      }],
+    });
+
+    expect(email.text).toContain("家庭共享收款");
+    expect(email.html).toContain("家庭共享收款");
+    expect(email.html).toContain("收款日期 · 2026-05-17 · 向 Partner 收款，提前 3 天提醒");
+    expect(email.html).toContain(">10</p>");
+    expect(email.html).toContain(">USD</p>");
   });
 
   it("renders en-US test notifications and settings CTA", () => {
@@ -150,7 +173,7 @@ describe("buildNotificationEmail", () => {
       content: "即将续费：Renewlet",
       timestamp: "2026-05-14 08:00:00 Asia/Shanghai",
       hasPayload: true,
-      items: [item("renewal", "Renewal", 18, "CNY", "2026-05-17", 3)],
+      items: [item("renewal", "Renewal", "18", "CNY", "2026-05-17", 3)],
     });
     const testStatus = buildNotificationEmail(settings(), testMessage());
     const empty = buildNotificationEmail(settings({ locale: "en-US" }), {
@@ -191,7 +214,7 @@ describe("buildNotificationEmail", () => {
       timestamp: "2026-05-14 08:00:00 Asia/Shanghai",
       hasPayload: true,
       items: [{
-        ...item("renewal", "<img src=x onerror=alert(1)>", 8, "<USD>", "2026-05-17", 3),
+        ...item("renewal", "<img src=x onerror=alert(1)>", "8", "<USD>", "2026-05-17", 3),
         logoUrl: "https://cdn.example.com/private-logo.png",
       }],
     });
@@ -219,7 +242,7 @@ describe("buildNotificationEmail", () => {
 
   it("falls back to compact content when html would exceed the clipping guard", () => {
     // Worker 和 Go 共用同一体积预算；超长账单列表必须走 compact fallback，避免邮件客户端裁剪关键内容。
-    const items = Array.from({ length: 800 }, (_, index) => item("renewal", `Very Long Subscription Name ${index}`, 18, "CNY", "2026-05-17", 3));
+    const items = Array.from({ length: 800 }, (_, index) => item("renewal", `Very Long Subscription Name ${index}`, "18", "CNY", "2026-05-17", 3));
     const email = buildNotificationEmail(settings(), {
       title: "Renewlet 订阅提醒",
       content: "即将续费：Renewlet\n".repeat(2_000),
@@ -265,7 +288,7 @@ function testMessage(): NotificationEmailMessage {
   };
 }
 
-function item(type: "renewal" | "trial" | "expired" | "expiry", name: string, price: number, currency: string, targetDate: string, reminderDays: number) {
+function item(type: NotificationEmailItem["type"], name: string, price: string, currency: string, targetDate: string, reminderDays: number) {
   return {
     type,
     subscriptionId: type,

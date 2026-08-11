@@ -32,10 +32,11 @@ export interface UserRow {
   updated_at: string;
 }
 
-/** Worker session 表保存 token hash；浏览器只持有原始 Bearer token，不读取此行结构。 */
+/** Worker session 表保存 session/CSRF hash；浏览器只能通过 HttpOnly cookie 使用原始 session token。 */
 export interface SessionRow {
   id: string;
   token_hash: string;
+  csrf_token_hash: string | null;
   user_id: string;
   expires_at: string;
   created_at: string;
@@ -46,6 +47,7 @@ export interface SessionRow {
 export interface SessionAuthRow extends UserRow {
   session_id: string;
   session_token_hash: string;
+  session_csrf_token_hash: string | null;
   session_user_id: string;
   session_expires_at: string;
   session_created_at: string;
@@ -138,13 +140,23 @@ export interface TelegramBotBindingRow {
   updated_at: string;
 }
 
+/** 站点级登录人机验证配置；key 固定为 global，secret 只给 Worker Siteverify 使用，不进入 status、备份或前端响应。 */
+export interface AuthSecuritySettingsRow {
+  key: "global";
+  turnstile_enabled: number;
+  turnstile_site_key: string;
+  turnstile_secret: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** D1 订阅行模型；snake_case 与整数布尔必须在 `toApiSubscription` 里收敛到 shared schema。 */
 export interface SubscriptionRow {
   id: string;
   user_id: string;
   name: string;
   logo: string | null;
-  price: number;
+  price: string;
   currency: string;
   billing_cycle: string;
   custom_days: number | null;
@@ -169,6 +181,9 @@ export interface SubscriptionRow {
   repeat_reminder_interval: string;
   repeat_reminder_window: string;
   cost_sharing_json?: string;
+  // 内部镜像列只给 D1 通知候选索引使用；API 出站必须继续从 cost_sharing_json 解析。
+  cost_sharing_collection_reminder_enabled: number;
+  cost_sharing_next_collection_reminder_date: string | null;
   extra_json: string;
   created_at: string;
   updated_at: string;
@@ -217,6 +232,7 @@ export interface SubscriptionUserStatsRow {
   user_id: string;
   total_count: number;
   status_counts_json: string;
+  source_updated_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -267,6 +283,21 @@ export interface PublicStatusPageRow {
   user_id: string;
   token: string;
   show_prices: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 月度汇率快照锁定报表折算口径；只保存 normalized USD rates 和非密来源 metadata。 */
+export interface ExchangeRateSnapshotRow {
+  user_id: string;
+  month: string;
+  base: "USD";
+  rates_json: string;
+  requested_provider: "frankfurter" | "floatrates" | "exchange-api";
+  provider: "frankfurter" | "floatrates" | "exchange-api";
+  source_date: string;
+  captured_at: string;
+  warning_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -325,7 +356,6 @@ export interface MediaIconIndexRefreshJobRow {
 
 /** 已通过 Worker session 校验的请求上下文。 */
 export interface AuthContext {
-  token: string;
   session: SessionRow;
   user: UserRow;
 }

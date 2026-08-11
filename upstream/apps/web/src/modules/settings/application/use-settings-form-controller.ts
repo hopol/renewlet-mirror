@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearThemeModeOverride, useTheme } from "@/lib/theme-provider";
 import { useCustomConfig } from "@/contexts/CustomConfigContext";
-import { useExchangeRates } from "@/hooks/use-exchange-rates";
+import { useReportExchangeRates, type ReportExchangeRateBasisStatus } from "@/hooks/use-report-exchange-rates";
 import { useSettings, useUpdateSettings } from "@/hooks/use-settings";
 import { useSubscriptions } from "@/hooks/use-subscriptions";
 import { usePasswordResetAvailability } from "@/hooks/use-password-reset-availability";
@@ -49,7 +49,7 @@ import type { CalendarFeedStatus } from "@/lib/api/schemas/calendar-feed";
 import { DEFAULT_SETTINGS, type AppSettings, type NotificationChannel, type Subscription } from "@/types/subscription";
 import { normalizePaymentMethods, type ConfigItem, type CustomConfig } from "@/types/config";
 import type { CustomThemeColor, ThemeMode, ThemeVariant } from "@/types/theme";
-import { parseNonNegativeFiniteNumberInput } from "@/lib/subscription-form";
+import { parseMoneyInput } from "@/lib/subscription-form";
 import { normalizeCustomConfig } from "@/modules/custom-config/domain/normalize-custom-config";
 import { isCloudflareRuntime } from "@/services/runtime";
 import { countSubscriptionsByCategory } from "../domain/category-usage";
@@ -80,6 +80,10 @@ import {
   useSettingsBuiltInIconIndexController,
   type SettingsBuiltInIconIndexController,
 } from "./use-built-in-icon-index-controller";
+import {
+  useAuthSecuritySettingsController,
+  type SettingsAuthSecurityController,
+} from "./use-auth-security-settings-controller";
 import {
   useNotificationHistory,
   type NotificationHistoryResponse,
@@ -135,6 +139,7 @@ export interface SettingsFormController {
   ratesError: string | null;
   ratesErrorDetails: RawErrorResponseDetails | null;
   ratesWarning: ExchangeRateCoverageWarning | null;
+  reportBasisStatus: ReportExchangeRateBasisStatus;
   getCurrencySymbol: (currency: string) => string;
   updateCategories: (items: ConfigItem[]) => void;
   updateStatuses: (items: ConfigItem[]) => void;
@@ -167,6 +172,7 @@ export interface SettingsFormController {
   publicStatusPage: SettingsPublicStatusPageController;
   publicApi: SettingsPublicApiController;
   telegramBotCommands: SettingsTelegramBotCommandsController;
+  authSecurity: SettingsAuthSecurityController;
   password: PasswordChangeController;
   passwordResetEnabled: boolean;
   externalIntegrationsDisabled: boolean;
@@ -206,8 +212,9 @@ export function useSettingsFormController(): SettingsFormController {
     error: ratesError,
     errorDetails: ratesErrorDetails,
     warning: ratesWarning,
+    reportBasisStatus,
     getCurrencySymbol,
-  } = useExchangeRates(savedSettings.exchangeRateProvider);
+  } = useReportExchangeRates(savedSettings.exchangeRateProvider);
   const { toast } = useToast();
   const { t, setLocale } = useI18n();
   const appStatus = useSetupStatus();
@@ -224,6 +231,7 @@ export function useSettingsFormController(): SettingsFormController {
   const deleteCalendarFeed = useDeleteCalendarFeed();
   const canRefreshBuiltInIconIndex = accountIdentity.role === "admin";
   const builtInIconIndex = useSettingsBuiltInIconIndexController(canRefreshBuiltInIconIndex);
+  const authSecurity = useAuthSecuritySettingsController(canManageUsers, sensitiveAccountActionsDisabled);
   const { refetch: refetchNotificationHistory } = notificationHistory;
   const hasInitializedFromRemoteRef = useRef(false);
   const hasResolvedDefaultRecipientEmailRef = useRef(false);
@@ -327,7 +335,7 @@ export function useSettingsFormController(): SettingsFormController {
         return;
       }
 
-      const parsed = parseNonNegativeFiniteNumberInput(rawValue);
+      const parsed = parseMoneyInput(rawValue);
       if (parsed === null) {
         setMonthlyBudgetError(t("settings.budgetInvalid"));
         return;
@@ -714,6 +722,7 @@ export function useSettingsFormController(): SettingsFormController {
     ratesError,
     ratesErrorDetails,
     ratesWarning,
+    reportBasisStatus,
     getCurrencySymbol,
     updateCategories,
     updateStatuses,
@@ -757,6 +766,7 @@ export function useSettingsFormController(): SettingsFormController {
     publicStatusPage,
     publicApi,
     telegramBotCommands,
+    authSecurity,
     password,
     passwordResetEnabled,
     externalIntegrationsDisabled,

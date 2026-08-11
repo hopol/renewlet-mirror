@@ -12,7 +12,14 @@ import {
   MAX_SUBSCRIPTION_TAGS,
   type SubscriptionDraft,
 } from "@/types/subscription";
-import { costSharingCustomAmountsAreValid } from "@renewlet/shared/cost-sharing";
+import {
+  costSharingCollectionAnchorsAreSatisfied,
+  costSharingCustomAmountsAreValid,
+  isValidCostSharingCollectionReminderDays,
+  costSharingMemberJoinedDatesWithinRange,
+  resolveCostSharingMemberJoinedDateRange,
+  type CostSharingMemberJoinedDateRange,
+} from "@renewlet/shared/cost-sharing";
 import type { SubscriptionFormState } from "@/types/subscription-form";
 import {
   DEFAULT_NOTIFICATION_REMINDER_DAYS,
@@ -25,6 +32,7 @@ import { translate } from "@/i18n/messages";
 import type { MessageKey } from "@/i18n/messages";
 import { compareDateOnly } from "@/lib/time/date-only";
 import { calculateOneTimeTermEndDate } from "@/lib/subscription-billing";
+import { canonicalizeMoneyString } from "@renewlet/shared/money";
 
 const MAX_PRICE = 1_000_000_000;
 const MAX_DAYS = MAX_REMINDER_DAYS;
@@ -34,13 +42,11 @@ type SubscriptionDraftBase = Omit<
   "billingCycle" | "customDays" | "customCycleUnit" | "oneTimeTermCount" | "oneTimeTermUnit"
 >;
 
-/** 严格解析非负有限数，拒绝 `1e3` 等浏览器/后端口径可能不一致的写法。 */
-export function parseNonNegativeFiniteNumberInput(input: string, max = MAX_PRICE): number | null {
+/** 严格解析金额输入，拒绝 `1e3` 和超过 6 位小数，返回跨 API/storage 的 canonical decimal string。 */
+export function parseMoneyInput(input: string, _max = MAX_PRICE): string | null {
   const value = input.trim();
-  if (!/^(?:\d+|\d+\.\d+|\.\d+)$/.test(value)) return null;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > max) return null;
-  return parsed;
+  if (value.startsWith(".")) return canonicalizeMoneyString(`0${value}`);
+  return canonicalizeMoneyString(value);
 }
 
 /** 严格解析非负整数，避免 `01`、小数和单位后缀被隐式接受。 */
@@ -172,6 +178,46 @@ export function getSubscriptionDateValidationKind(formData: Pick<
   return null;
 }
 
+export function costSharingCollectionReminderIsAllowedForBillingCycle(formData: Pick<
+  SubscriptionFormState,
+  "billingCycle" | "oneTimeMode"
+>): boolean {
+  return !(formData.billingCycle === "one-time" && formData.oneTimeMode === "buyout");
+}
+
+export function resolveCostSharingJoinedDateRangeForForm(formData: Pick<
+  SubscriptionFormState,
+  "billingCycle" | "oneTimeMode" | "oneTimeTermCount" | "oneTimeTermUnit" | "startDate" | "nextBillingDate"
+>): CostSharingMemberJoinedDateRange {
+  return resolveCostSharingMemberJoinedDateRange(costSharingJoinedDateRangeInputForForm(formData));
+}
+
+export function costSharingJoinedDatesWithinFormRange(formData: Pick<
+  SubscriptionFormState,
+  "billingCycle" | "oneTimeMode" | "oneTimeTermCount" | "oneTimeTermUnit" | "startDate" | "nextBillingDate" | "costSharing"
+>): boolean {
+  return costSharingMemberJoinedDatesWithinRange(formData.costSharing, costSharingJoinedDateRangeInputForForm(formData));
+}
+
+function costSharingJoinedDateRangeInputForForm(formData: Pick<
+  SubscriptionFormState,
+  "billingCycle" | "oneTimeMode" | "oneTimeTermCount" | "oneTimeTermUnit" | "startDate" | "nextBillingDate"
+>) {
+  const oneTimeTermCount = formData.billingCycle === "one-time" && formData.oneTimeMode === "term"
+    ? parsePositiveIntegerInput(formData.oneTimeTermCount)
+    : null;
+  const nextBillingDate = formData.billingCycle === "one-time" && formData.oneTimeMode === "term" && formData.startDate && oneTimeTermCount
+    ? calculateOneTimeTermEndDate(formData.startDate, oneTimeTermCount, formData.oneTimeTermUnit)
+    : formData.nextBillingDate;
+  return {
+    subscriptionStartDate: formData.startDate ?? null,
+    nextBillingDate: nextBillingDate ?? null,
+    billingCycle: formData.billingCycle,
+    oneTimeTermCount,
+    oneTimeTermUnit: formData.billingCycle === "one-time" && formData.oneTimeMode === "term" ? formData.oneTimeTermUnit : null,
+  };
+}
+
 export function subscriptionDateValidationMessageKey(kind: SubscriptionDateValidationKind): MessageKey {
   switch (kind) {
     case "purchaseDateRequired":
@@ -193,7 +239,7 @@ export function getSubscriptionDraftValidationError(formData: SubscriptionFormSt
   if (dateValidationKind) {
     return translate(locale, subscriptionDateValidationMessageKey(dateValidationKind));
   }
-  if (parseNonNegativeFiniteNumberInput(formData.price) === null) return translate(locale, "subscription.validation.amountInvalid");
+  if (parseMoneyInput(formData.price) === null) return translate(locale, "subscription.validation.amountInvalid");
   const reminderInput = formData.reminderType === "custom" ? formData.customReminderDays : formData.reminderDays;
   const reminderValue = formData.billingCycle === "one-time" && formData.oneTimeMode === "buyout"
     ? DISABLED_REMINDER_DAYS
@@ -214,7 +260,22 @@ export function getSubscriptionDraftValidationError(formData: SubscriptionFormSt
     return translate(locale, "subscription.validation.oneTimeTermInvalid");
   }
   if (formData.costSharing?.enabled) {
-    const price = parseNonNegativeFiniteNumberInput(formData.price);
+    const price = parseMoneyInput(formData.price);
+    const collectionReminder = formData.costSharing.collectionReminder;
+    if (collectionReminder?.enabled) {
+      if (!costSharingCollectionReminderIsAllowedForBillingCycle(formData)) {
+        return translate(locale, "subscription.validation.costSharingCollectionReminderOneTimeBuyoutInvalid");
+      }
+      if (!isValidCostSharingCollectionReminderDays(collectionReminder.reminderDays)) {
+        return translate(locale, "subscription.validation.costSharingCollectionReminderInvalid");
+      }
+      if (!costSharingCollectionAnchorsAreSatisfied(formData.costSharing, formData.startDate ?? null)) {
+        return translate(locale, "subscription.validation.costSharingCollectionReminderAnchorRequired");
+      }
+    }
+    if (!costSharingJoinedDatesWithinFormRange(formData)) {
+      return translate(locale, "subscription.validation.costSharingMemberJoinedDateRangeInvalid");
+    }
     if (
       price === null ||
       formData.costSharing.members.length === 0 ||
@@ -239,7 +300,7 @@ export function getSubscriptionDraftValidationError(formData: SubscriptionFormSt
 export function toSubscriptionDraft(formData: SubscriptionFormState): SubscriptionDraft | null {
   if (getSubscriptionDraftValidationError(formData)) return null;
 
-  const price = parseNonNegativeFiniteNumberInput(formData.price);
+  const price = parseMoneyInput(formData.price);
   const reminderDays = formData.billingCycle === "one-time" && formData.oneTimeMode === "buyout"
     ? DISABLED_REMINDER_DAYS
     : toReminderDays(formData);

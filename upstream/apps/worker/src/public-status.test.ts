@@ -10,7 +10,7 @@ import {
   readPublicStatusPage,
   updatePublicStatusPage,
 } from "./public-status";
-import type { AssetRow, Env, PublicStatusPageRow, SubscriptionRow } from "./types";
+import type { AssetRow, Env, ExchangeRateSnapshotRow, PublicStatusPageRow, SubscriptionRow } from "./types";
 
 const USER_ID = "usr_public";
 const TOKEN = "pubtokenpubtokenpubtokenpubtokenpubtokenpub";
@@ -35,6 +35,7 @@ type PublicStatusTestState = {
   pages: PublicStatusPageRow[];
   subscriptions: SubscriptionRow[];
   assets: AssetRow[];
+  exchangeRateSnapshots: ExchangeRateSnapshotRow[];
   settingsJson: string | null;
   customConfigJson: string | null;
   objects: Map<string, R2ObjectBody>;
@@ -51,6 +52,7 @@ function createEnv(overrides: Partial<PublicStatusTestState> = {}): Env {
     pages: [],
     subscriptions: [],
     assets: [],
+    exchangeRateSnapshots: [],
     settingsJson: JSON.stringify(settings),
     customConfigJson: JSON.stringify({
       categories: [
@@ -117,6 +119,10 @@ class PublicStatusTestStatement {
     if (this.sql.includes("FROM assets")) {
       const [userId, assetId] = this.values as [string, string];
       return this.state.assets.find((asset) => asset.user_id === userId && asset.id === assetId) as T | undefined ?? null;
+    }
+    if (this.sql.includes("FROM exchange_rate_snapshots")) {
+      const [userId, month] = this.values as [string, string];
+      return this.state.exchangeRateSnapshots.find((snapshot) => snapshot.user_id === userId && snapshot.month === month) as T | undefined ?? null;
     }
     if (this.sql.includes("FROM subscriptions") && this.sql.includes("public_hidden = 0 AND logo = ?")) {
       const [userId, logo] = this.values as [string, string];
@@ -207,7 +213,7 @@ function subscriptionRow(overrides: Partial<SubscriptionRow> = {}): Subscription
     user_id: USER_ID,
     name: "Visible Plan",
     logo: null,
-    price: 12,
+    price: "12",
     currency: "USD",
     billing_cycle: "monthly",
     custom_days: null,
@@ -231,6 +237,9 @@ function subscriptionRow(overrides: Partial<SubscriptionRow> = {}): Subscription
     repeat_reminder_enabled: 0,
     repeat_reminder_interval: "1h",
     repeat_reminder_window: "72h",
+    cost_sharing_json: "{}",
+    cost_sharing_collection_reminder_enabled: 0,
+    cost_sharing_next_collection_reminder_date: null,
     extra_json: JSON.stringify({ secret: true }),
     created_at: "2026-05-01T00:00:00.000Z",
     updated_at: "2026-06-01T00:00:00.000Z",
@@ -253,6 +262,23 @@ function assetRow(overrides: Partial<AssetRow> = {}): AssetRow {
   };
 }
 
+function exchangeRateSnapshotRow(overrides: Partial<ExchangeRateSnapshotRow> = {}): ExchangeRateSnapshotRow {
+  return {
+    user_id: USER_ID,
+    month: new Date().toISOString().slice(0, 7),
+    base: "USD",
+    rates_json: JSON.stringify({ USD: 1, CNY: 7 }),
+    requested_provider: "frankfurter",
+    provider: "frankfurter",
+    source_date: "2026-08-01",
+    captured_at: "2026-08-06T00:00:00.000Z",
+    warning_json: null,
+    created_at: "2026-08-06T00:00:00.000Z",
+    updated_at: "2026-08-06T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 function r2Object(body: string, contentType: string): R2ObjectBody {
   const blob = new Blob([body], { type: contentType });
   return {
@@ -263,7 +289,7 @@ function r2Object(body: string, contentType: string): R2ObjectBody {
 
 beforeEach(() => {
   authMocks.requireAuth.mockReset();
-  authMocks.requireAuth.mockResolvedValue({ user: { id: USER_ID }, session: { id: "ses" }, token: "test" });
+  authMocks.requireAuth.mockResolvedValue({ user: { id: USER_ID }, session: { id: "ses" } });
 });
 
 describe("public status worker handlers", () => {
@@ -303,7 +329,7 @@ describe("public status worker handlers", () => {
       subscriptions: [
         subscriptionRow({ id: "sub_hidden", name: "Hidden Plan", public_hidden: 1 }),
         subscriptionRow({ id: "sub_visible", name: "Visible Plan", created_at: "2026-05-01T00:00:00.000Z" }),
-        subscriptionRow({ id: "sub_overdue", name: "Legacy Overdue", next_billing_date: "2000-01-01", created_at: "2026-06-03T00:00:00.000Z" }),
+        subscriptionRow({ id: "sub_overdue", name: "Legacy Overdue", start_date: "1999-01-01", next_billing_date: "2000-01-01", created_at: "2026-06-03T00:00:00.000Z" }),
         subscriptionRow({ id: "sub_later", name: "Later Plan", next_billing_date: "2099-08-01", created_at: "2026-06-02T00:00:00.000Z" }),
         subscriptionRow({ id: "sub_pinned", name: "Pinned Plan", pinned: 1, next_billing_date: "2026-09-01", created_at: "2026-05-15T00:00:00.000Z" }),
       ],
@@ -340,12 +366,21 @@ describe("public status worker handlers", () => {
     const pricedEnv = createEnv({
       pages: [publicPage({ show_prices: 1 })],
       subscriptions: [subscriptionRow()],
+      exchangeRateSnapshots: [exchangeRateSnapshotRow()],
       settingsJson: JSON.stringify(pricedSettings),
     });
     const pricedResponse = await readPublicStatus(publicRequest(`/api/public/status/${TOKEN}`), pricedEnv, TOKEN);
     expect(await readSuccessData(pricedResponse)).toMatchObject({
-      page: { showPrices: true, currency: "USD" },
-      subscriptions: [{ price: 12, currency: "USD", billingCycle: "monthly" }],
+      page: {
+        showPrices: true,
+        currency: "USD",
+        exchangeRateBasis: {
+          status: "locked",
+          base: "USD",
+          rates: { USD: 1, CNY: 7 },
+        },
+      },
+      subscriptions: [{ price: "12", currency: "USD", billingCycle: "monthly" }],
     });
   });
 

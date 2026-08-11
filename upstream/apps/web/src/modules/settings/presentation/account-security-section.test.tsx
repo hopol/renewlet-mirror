@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountSettingsSectionProps } from "./account-settings-section";
 import { AccountSettingsSection } from "./account-settings-section";
@@ -414,6 +414,7 @@ describe("AccountSettingsSection account security dialogs", () => {
 
     expect(screen.getByRole("heading", { name: "身份验证器" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "通行密钥" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Cloudflare Turnstile" })).not.toBeInTheDocument();
     expect(screen.getAllByText("身份验证器").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("恢复码")).toBeInTheDocument();
     expect(screen.getByText("已添加：1 个")).toBeInTheDocument();

@@ -12,8 +12,8 @@ import {
   parseCustomHeadScript,
   updateCustomHeadScriptStaticHeaders,
   type CustomHeadScript,
-} from "./vite/custom-head-script";
-import { resolveClientBuildVersion } from "./vite/build-version";
+} from "./vite/custom-head-script.js";
+import { resolveClientBuildVersion } from "./vite/build-version.js";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(rootDir, "../..");
@@ -41,8 +41,9 @@ const customHeadScriptPlugin = (script: CustomHeadScript | undefined, options: {
 });
 
 function contentSecurityPolicy(script: CustomHeadScript | undefined): string {
-  const scriptSources = ["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'"];
-  const connectSources = ["'self'", "https:"];
+  const turnstileChallengeOrigin = "https://challenges.cloudflare.com";
+  const scriptSources = ["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'", turnstileChallengeOrigin];
+  const connectSources = ["'self'", "https:", turnstileChallengeOrigin];
   if (script) {
     appendUniqueString(scriptSources, script.scriptOrigin);
     for (const origin of script.connectOrigins) appendUniqueString(connectSources, origin);
@@ -54,6 +55,7 @@ function contentSecurityPolicy(script: CustomHeadScript | undefined): string {
     "img-src 'self' data: blob: http: https:",
     "connect-src " + connectSources.join(" "),
     "font-src 'self' data:",
+    "frame-src " + turnstileChallengeOrigin,
     "object-src 'none'",
     "base-uri 'self'",
     "frame-ancestors 'none'",
@@ -63,7 +65,7 @@ function contentSecurityPolicy(script: CustomHeadScript | undefined): string {
 const vendorChunkGroups = [
   {
     name: "react-vendor",
-    test: /node_modules[\\/](react|react-dom|react-router|react-router-dom|@tanstack)[\\/]/,
+    test: /node_modules[\\/](react|react-dom|react-router|@tanstack)[\\/]/,
     priority: 50,
   },
   {

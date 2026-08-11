@@ -13,6 +13,8 @@ import {
 import { effectiveReminderDays, isDisabledReminderDays } from "@renewlet/shared/runtime";
 import { appSettingsSchema, settingsUpdateBodySchema, type ApiAppSettings } from "@renewlet/shared/schemas/settings";
 import type { ApiSubscription } from "@renewlet/shared/schemas/subscriptions";
+import { divideMoney, type MoneyString } from "@renewlet/shared/money";
+import { costSharingCollectionReminderOccurrencesForDate } from "@renewlet/shared/cost-sharing";
 import { cleanBuiltInIconSourceSettingsPatch, mergeBuiltInIconSourceSettings } from "@renewlet/shared/built-in-icons";
 import { cleanOnlineIconSourceSettingsPatch, mergeOnlineIconSourceSettings } from "@renewlet/shared/online-icon-sources";
 import {
@@ -25,6 +27,7 @@ import {
   toApiSubscription,
 } from "./db";
 import { renewAutoSubscriptionsForUserInTimezone } from "./subscription-renewal";
+import { refreshCostSharingCollectionReminderMirrors } from "./subscriptions";
 import { getSubscriptionSchedulerState, listNotificationDueUsers, refreshSubscriptionSchedulerState } from "./subscription-scheduler-state";
 import { HttpError, ok, readOptionalJson, readJson, requestLocale, successJson, type AppLocale } from "./http";
 import { DEFAULT_SERVER_I18N_LOCALE, serverFormat, serverText } from "./server-i18n";
@@ -149,17 +152,16 @@ export async function runScheduledNotifications(env: Env): Promise<void> {
   for (;;) {
     let users: Array<{ user_id: string }>;
     try {
-      users = await listNotificationDueUsers(env, now, CRON_USER_PAGE_SIZE);
+      // failed/fresh sending 会故意留在 due-index 内；查询时排除本 tick 已处理用户，避免第一页失败用户饿住后续 due 用户。
+      users = await listNotificationDueUsers(env, now, CRON_USER_PAGE_SIZE, [...seenUserIds]);
     } catch (error) {
       logScheduledNotificationError({ phase: "list_due_users", error });
       throw scheduledRuntimeError(error);
     }
-    // 失败/锁竞争会让 due 行保留到下一分钟；本 tick 内去重即可避免同一 Worker 事件反复处理同一用户。
-    const runnable = users.filter((user) => !seenUserIds.has(user.user_id));
-    if (runnable.length === 0) break;
-    for (const user of runnable) seenUserIds.add(user.user_id);
+    if (users.length === 0) break;
+    for (const user of users) seenUserIds.add(user.user_id);
     // Cron 运行在 Worker 平台限额内；分页加固定并发避免一次 tick 把 D1/通知 provider 打满。
-    await runBounded(runnable, CRON_USER_CONCURRENCY, async (user) => {
+    await runBounded(users, CRON_USER_CONCURRENCY, async (user) => {
       try {
         await runScheduledForUser(env, user.user_id, now);
       } catch (error) {
@@ -251,6 +253,7 @@ async function runScheduledForUser(env: Env, userId: string, now = new Date()): 
   const outcome = await runCronForUser(env, userId, settings, subscriptions, occurrence, now, DEFAULT_SERVER_I18N_LOCALE);
   if (outcome === "settled") {
     // failed/fresh sending 需要继续留在 due-index 内重试；只有 sent/skipped/终止状态才推进到下一次提醒。
+    await refreshCostSharingCollectionReminderMirrors(env, userId, settings, addDays(occurrence.scheduledLocalDate, 1));
     await refreshSubscriptionSchedulerState(env, userId, { resetAutoRenewCheck: false, now, skipCurrentNotificationWindow: true });
   }
 }
@@ -443,6 +446,7 @@ function groupedNotificationContent(items: NotificationEmailItem[], locale: AppL
     ["expiry", "notification.content.expiryBlock"],
     ["trial", "notification.content.trialBlock"],
     ["expired", "notification.content.expiredBlock"],
+    ["costSharing", "notification.content.costSharingBlock"],
   ] as const;
   return groups
     .map(([type, titleKey]) => {
@@ -463,15 +467,19 @@ function notificationItemLine(item: NotificationEmailItem, locale: AppLocale): s
     extra = serverFormat(locale, "notification.content.expiryReminderDays", { days: item.reminderDays });
   } else if (item.type === "expired") {
     extra = serverText(locale, "notification.content.expiredStatus");
+  } else if (item.type === "costSharing" && item.costSharing) {
+    extra = serverFormat(locale, "notification.content.costSharingReminderDays", { member: item.costSharing.memberName, days: item.reminderDays });
   }
   if (item.repeatReminder) {
     extra += serverText(locale, "notification.content.repeatSeparator") + serverFormat(locale, "notification.content.repeatEvery", { hours: repeatReminderHours(item.repeatReminder.interval) });
   }
+  const amount = item.type === "costSharing" && item.costSharing ? item.costSharing.amount : item.price;
+  const currency = item.type === "costSharing" && item.costSharing ? item.costSharing.currency : item.currency;
   return serverFormat(locale, "notification.content.itemLine", {
     name: item.name,
     targetDate: item.targetDate,
-    amount: formatAmount(item.price),
-    currency: item.currency,
+    amount: formatAmount(amount),
+    currency,
     extra,
   });
 }
@@ -481,10 +489,8 @@ function repeatReminderHours(interval: string): number {
   return match?.[1] ? Number.parseInt(match[1], 10) : 1;
 }
 
-function formatAmount(amount: number): string {
-  if (!Number.isFinite(amount)) return String(amount);
-  const fixed = amount.toFixed(2);
-  return fixed.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+function formatAmount(amount: string): string {
+  return amount;
 }
 
 export function collectNotificationItemsForLocalDate(
@@ -499,30 +505,67 @@ export function collectNotificationItemsForLocalDate(
 function collectItems(localDate: string, settings: ApiAppSettings, subscriptions: ApiSubscription[], options: { includeExpired: boolean }): NotificationEmailItem[] {
   const items: NotificationEmailItem[] = [];
   for (const sub of subscriptions) {
-    if (isDisabledReminderDays(sub.reminderDays)) {
-      // -2 是单订阅静默哨兵；Worker Cron 和手动运行都在入口跳过，历史 payload 也不保留该订阅。
-      continue;
-    }
-    const reminderDays = effectiveReminderDays(sub.reminderDays, settings.notificationReminderDays);
-    if (reminderDays === undefined) continue;
     const daysUntilNext = daysBetween(localDate, sub.nextBillingDate);
-    if (sub.billingCycle === "one-time" && !sub.oneTimeTermCount) {
-      // one-time 买断记录没有权益到期日；Worker 不能把购买日当成续费或过期边界。
-      continue;
+    const isOneTimeBuyout = sub.billingCycle === "one-time" && !sub.oneTimeTermCount;
+    const reminderDays = effectiveReminderDays(sub.reminderDays, settings.notificationReminderDays);
+    if (!isDisabledReminderDays(sub.reminderDays) && reminderDays !== undefined && !isOneTimeBuyout) {
+      if (sub.billingCycle === "one-time") {
+        if (daysUntilNext === reminderDays) items.push(item("expiry", sub, sub.nextBillingDate, daysUntilNext, reminderDays));
+        if (daysUntilNext < 0 && settings.showExpired && options.includeExpired) items.push(item("expired", sub, sub.nextBillingDate, daysUntilNext, reminderDays));
+      } else {
+        if (daysUntilNext < 0 && settings.showExpired && options.includeExpired) items.push(item("expired", sub, sub.nextBillingDate, daysUntilNext, reminderDays));
+        if (daysUntilNext === reminderDays) items.push(item("renewal", sub, sub.nextBillingDate, daysUntilNext, reminderDays));
+      }
+      if (sub.status === "trial" && sub.trialEndDate) {
+        const daysUntilTrial = daysBetween(localDate, sub.trialEndDate);
+        if (daysUntilTrial === reminderDays) items.push(item("trial", sub, sub.trialEndDate, daysUntilTrial, reminderDays));
+      }
     }
-    if (sub.billingCycle === "one-time") {
-      if (daysUntilNext === reminderDays) items.push(item("expiry", sub, sub.nextBillingDate, daysUntilNext, reminderDays));
-      if (daysUntilNext < 0 && settings.showExpired && options.includeExpired) items.push(item("expired", sub, sub.nextBillingDate, daysUntilNext, reminderDays));
-    } else {
-      if (daysUntilNext < 0 && settings.showExpired && options.includeExpired) items.push(item("expired", sub, sub.nextBillingDate, daysUntilNext, reminderDays));
-      if (daysUntilNext === reminderDays) items.push(item("renewal", sub, sub.nextBillingDate, daysUntilNext, reminderDays));
-    }
-    if (sub.status === "trial" && sub.trialEndDate) {
-      const daysUntilTrial = daysBetween(localDate, sub.trialEndDate);
-      if (daysUntilTrial === reminderDays) items.push(item("trial", sub, sub.trialEndDate, daysUntilTrial, reminderDays));
+    if (!isOneTimeBuyout) {
+      items.push(...collectCostSharingCollectionItems(sub, settings, localDate));
     }
   }
   return items;
+}
+
+function collectCostSharingCollectionItems(
+  sub: ApiSubscription,
+  settings: ApiAppSettings,
+  localDate: string,
+): NotificationEmailItem[] {
+  const occurrences = costSharingCollectionReminderOccurrencesForDate({
+    costSharing: sub.costSharing,
+    subscriptionStartDate: sub.startDate,
+    nextBillingDate: sub.nextBillingDate,
+    billingCycle: sub.billingCycle,
+    customDays: sub.customDays,
+    customCycleUnit: sub.customCycleUnit,
+    oneTimeTermCount: sub.oneTimeTermCount,
+    oneTimeTermUnit: sub.oneTimeTermUnit,
+    notificationReminderDays: settings.notificationReminderDays,
+    referenceDate: localDate,
+  });
+  return occurrences.flatMap((occurrence) => {
+    const payload = costSharingCollectionPayload(sub, occurrence.member);
+    return payload ? [item("costSharing", sub, occurrence.targetDate, occurrence.reminderDays, occurrence.reminderDays, undefined, payload)] : [];
+  });
+}
+
+function costSharingCollectionPayload(
+  sub: ApiSubscription,
+  member: NonNullable<ApiSubscription["costSharing"]>["members"][number],
+): { memberName: string; amount: MoneyString; currency: string } | null {
+  if (!sub.costSharing) return null;
+  if (sub.costSharing.splitMode === "custom") {
+    if (!member.customAmount) return null;
+    // custom 模式只使用成员配置金额和币种；Worker 不做汇率猜测，也不改写为订阅币种。
+    return { memberName: member.name, amount: member.customAmount, currency: member.currency ?? sub.currency };
+  }
+  return {
+    memberName: member.name,
+    amount: divideMoney(sub.price, sub.costSharing.members.length + 1),
+    currency: sub.currency,
+  };
 }
 
 export function collectNotificationItemsForSchedule(schedule: ScheduleOccurrence, settings: ApiAppSettings, subscriptions: ApiSubscription[], options: { includeExpired?: boolean } = {}): NotificationEmailItem[] {
@@ -596,7 +639,8 @@ function uniqueNotificationItems(items: NotificationEmailItem[]): NotificationEm
   const out: NotificationEmailItem[] = [];
   for (const item of items) {
     const repeatKey = item.repeatReminder ? `${item.repeatReminder.interval}/${item.repeatReminder.window}` : "";
-    const key = `${item.type}|${item.subscriptionId}|${item.targetDate}|${repeatKey}`;
+    const collectionKey = item.costSharing ? `${item.costSharing.memberName}/${item.costSharing.amount}/${item.costSharing.currency}` : "";
+    const key = `${item.type}|${item.subscriptionId}|${item.targetDate}|${repeatKey}|${collectionKey}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(item);
@@ -610,12 +654,13 @@ function earlierOccurrence(daily: ScheduleOccurrence, repeat: ScheduleOccurrence
 }
 
 function item(
-  type: "renewal" | "trial" | "expired" | "expiry",
+  type: "renewal" | "trial" | "expired" | "expiry" | "costSharing",
   sub: ApiSubscription,
   targetDate: string,
   daysUntil: number,
   reminderDays: number,
   repeatReminder?: RepeatReminderSnapshot,
+  costSharing?: { memberName: string; amount: MoneyString; currency: string },
 ): NotificationEmailItem {
   return {
     type,
@@ -629,6 +674,7 @@ function item(
     reminderDays,
     daysUntil,
     ...(repeatReminder ? { repeatReminder } : {}),
+    ...(costSharing ? { costSharing } : {}),
   };
 }
 
