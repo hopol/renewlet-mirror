@@ -369,57 +369,50 @@ type systemRestartRequest struct{}
 // calendarFeedCreateRequest 只允许空对象，用于显式拒绝前端/客户端误传 token 等敏感字段。
 type calendarFeedCreateRequest struct{}
 
-// subscriptionRenewRequest 只允许空对象；手动续订的对象由 URL id 和当前登录用户共同确定。
-type subscriptionRenewRequest struct{}
-
-// systemBuildInfo 是前端版本弹窗展示的构建元数据；发布构建由 CI ldflags 注入。
-type systemBuildInfo struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	BuildTime string `json:"buildTime"`
-	BuildType string `json:"buildType"`
+// subscriptionRenewRequest 是手动续订的显式 payload；URL id 和当前登录用户仍是 owner 写入边界。
+type subscriptionRenewRequest struct {
+	Mode                         string                    `json:"mode"`
+	Price                        string                    `json:"price"`
+	Currency                     string                    `json:"currency"`
+	StartDate                    optionalJSONField[string] `json:"startDate"`
+	NextBillingDate              string                    `json:"nextBillingDate"`
+	AutoCalculateNextBillingDate bool                      `json:"autoCalculateNextBillingDate"`
 }
 
-// systemReleaseAssetDTO 只暴露资产名称和大小；真实下载 URL 只留在后端校验链路内，避免浏览器绕过校验直连。
-type systemReleaseAssetDTO struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-}
-
-// systemReleaseInfoDTO 是 GitHub Release 的前端展示视图。
-type systemReleaseInfoDTO struct {
-	TagName     string                  `json:"tagName"`
-	Version     string                  `json:"version"`
-	Name        string                  `json:"name"`
-	Body        string                  `json:"body"`
-	PublishedAt string                  `json:"publishedAt"`
-	HTMLURL     string                  `json:"htmlUrl"`
-	Assets      []systemReleaseAssetDTO `json:"assets"`
-}
-
-// systemVersionResponse 描述当前部署形态、版本检查结果，以及是否能页面内执行二进制更新。
-type systemVersionResponse struct {
-	CurrentVersion    string                `json:"currentVersion"`
-	LatestVersion     string                `json:"latestVersion"`
-	HasUpdate         bool                  `json:"hasUpdate"`
-	CheckSucceeded    bool                  `json:"checkSucceeded"`
-	Deployment        string                `json:"deployment"`
-	UpdateMode        string                `json:"updateMode"`
-	UpdateSupported   bool                  `json:"updateSupported"`
-	UnsupportedReason string                `json:"unsupportedReason,omitempty"`
-	ReleaseInfo       *systemReleaseInfoDTO `json:"releaseInfo"`
-	Cached            bool                  `json:"cached"`
-	Warning           string                `json:"warning,omitempty"`
-	ErrorDetails      *upstreamErrorDetails `json:"errorDetails,omitempty"`
-	Build             systemBuildInfo       `json:"build"`
-}
-
-// systemUpdateResponse 表示二进制已经替换完成，等待管理员在前端确认重启。
-type systemUpdateResponse struct {
-	CurrentVersion string `json:"currentVersion"`
-	TargetVersion  string `json:"targetVersion"`
-	NeedsRestart   bool   `json:"needsRestart"`
-	Message        string `json:"message"`
+func (r *subscriptionRenewRequest) Validate(locale appLocale) error {
+	r.Mode = strings.TrimSpace(r.Mode)
+	if r.Mode != "continue" && r.Mode != "restart" {
+		return errors.New(serverText(locale, "common.invalidRequestParameters"))
+	}
+	price, err := canonicalMoneyString(r.Price)
+	if err != nil {
+		return errors.New(serverText(locale, "common.invalidRequestParameters"))
+	}
+	r.Price = price
+	// shared/Worker 都把货币当作大写 ISO 边界；Docker 不能在这里自动 upper，否则两端会接受不同请求。
+	r.Currency = strings.TrimSpace(r.Currency)
+	if !currencyCodeRe.MatchString(r.Currency) {
+		return errors.New(serverText(locale, "common.invalidRequestParameters"))
+	}
+	if r.StartDate.Set && !r.StartDate.Null {
+		r.StartDate.Value = strings.TrimSpace(r.StartDate.Value)
+	}
+	r.NextBillingDate = strings.TrimSpace(r.NextBillingDate)
+	if r.Mode == "restart" && (!r.StartDate.Set || r.StartDate.Null || r.StartDate.Value == "") {
+		return errors.New(serverText(locale, "common.invalidRequestParameters"))
+	}
+	if r.StartDate.Set && !r.StartDate.Null && r.StartDate.Value != "" {
+		if err := requireDateOnly(r.StartDate.Value, "START_DATE"); err != nil {
+			return errors.New(serverText(locale, "common.invalidRequestParameters"))
+		}
+	}
+	if err := requireDateOnly(r.NextBillingDate, "NEXT_BILLING_DATE"); err != nil {
+		return errors.New(serverText(locale, "common.invalidRequestParameters"))
+	}
+	if r.StartDate.Set && !r.StartDate.Null && r.StartDate.Value != "" && r.NextBillingDate < r.StartDate.Value {
+		return errors.New(serverText(locale, "common.invalidRequestParameters"))
+	}
+	return nil
 }
 
 type builtInIconProviderCountsResponse struct {

@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback } from "react";
 import { FormField, FormFieldRow } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,7 +23,6 @@ import type {
 import {
   DISABLED_REMINDER_DAYS,
   INHERIT_REMINDER_DAYS,
-  CURRENCY_OPTIONS,
   CUSTOM_CYCLE_UNITS,
   CYCLE_LABELS,
   REMINDER_DAYS_OPTIONS,
@@ -32,7 +31,6 @@ import {
   REPEAT_REMINDER_WINDOW_OPTIONS,
 } from "@/types/subscription";
 import type { SubscriptionFormReminderType, SubscriptionFormState } from "@/types/subscription-form";
-import { createCurrencySelectOptions } from "@/lib/searchable-options";
 import { toReminderDays } from "@/lib/subscription-form";
 import { customCycleUnitLabelKey } from "@/lib/subscription-billing";
 import { useI18n } from "@/i18n/I18nProvider";
@@ -71,6 +69,7 @@ export const SubscriptionFormFields = memo(function SubscriptionFormFields({
   config,
   formData,
   setFormData,
+  currencyOptions,
   availableTags = [],
   showLogoField = true,
   onLogoUploadStatusChange,
@@ -79,8 +78,7 @@ export const SubscriptionFormFields = memo(function SubscriptionFormFields({
   onClearFieldError,
   notificationReminderDays,
   costSharingCurrencyConvert,
-  onManageCostSharingMembers,
-  costSharingManageMembersButtonRef,
+  onNestedDialogOpenChange,
 }: SubscriptionFormFieldsProps) {
   const { t, locale, label } = useI18n();
 
@@ -146,27 +144,13 @@ export const SubscriptionFormFields = memo(function SubscriptionFormFields({
     for (const errorField of getErrorFieldsToClearForFormChange(key)) {
       onClearFieldError?.(errorField);
     }
-    // onFieldChange 是外层识别“用户明确修改过某字段”的钩子，例如新增订阅默认货币同步策略。
-    // 这里保持泛型 key/value 绑定，避免调用方把字段和值的类型拆散。
+    // 外层用该事件消费“用户明确修改”语义，例如停止默认货币同步或确认 AI 缺省字段；程序化回写不能冒充用户确认。
     onFieldChange?.(key, value);
   }, [onClearFieldError, onFieldChange, setFormData]);
 
   const id = (name: string) => `${idPrefix}${name}`;
   const categoryId = id("category");
 
-  // 货币选项受“设置 → 货币管理（启用/禁用）”控制：
-  // - 默认只展示 enabled=true 的货币
-  // - 若当前值是“已禁用货币”（例如历史订阅数据），仍展示一个不可选项用于回显，避免选择器空白
-  const currencyOptions = useMemo(
-    () =>
-      createCurrencySelectOptions({
-        currencies: config.currencies,
-        currencyOptions: CURRENCY_OPTIONS,
-        includeDisabledCurrent: formData.currency,
-        locale,
-      }),
-    [config.currencies, formData.currency, locale],
-  );
   const statusLabel = config.statuses.find((status) => status.value === formData.status)?.labels;
   const categoryLabel = config.categories.find((category) => category.value === formData.category)?.labels;
   const paymentMethodLabel =
@@ -675,8 +659,7 @@ export const SubscriptionFormFields = memo(function SubscriptionFormFields({
         currencyConvert={costSharingCurrencyConvert}
         notificationReminderDays={notificationReminderDays}
         collectionReminderAllowed={!isOneTimeBuyout}
-        onManageMembers={onManageCostSharingMembers}
-        manageMembersButtonRef={costSharingManageMembersButtonRef}
+        onNestedDialogOpenChange={onNestedDialogOpenChange}
       />
 
       <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-secondary/30 p-3">
