@@ -27,7 +27,7 @@ import type { SettingsAuthSecurityController } from "../application/use-auth-sec
 import type { SettingsTelegramBotCommandsController } from "../application/use-telegram-bot-commands-controller";
 import type { SettingsFormController } from "../application/settings-form-controller-types";
 import type { SettingsCalendarFeedController } from "../application/use-calendar-feed-settings-controller";
-import type { CloudBackupController } from "../application/use-cloud-backup-controller";
+import { createCloudBackupControllerState } from "./cloud-backup-controller-test-utils";
 import type { SettingsReadState } from "../application/settings-read-state";
 import { MFA_STATUS_QUERY_KEY, PASSKEYS_QUERY_KEY } from "./account-security-query-keys";
 const mocks = vi.hoisted(() => ({
@@ -222,9 +222,25 @@ vi.mock("@/contexts/CustomConfigContext", async () => {
 });
 
 vi.mock("./settings-advanced-sections-loader", async () => {
-  const module = await import("./settings-advanced-sections");
+  const [resourcesAi, budgetData, cloudCalendar, publicNotifications] = await Promise.all([
+    import("./settings-advanced-group-resources-ai"),
+    import("./settings-advanced-group-budget-data"),
+    import("./settings-advanced-group-cloud-calendar"),
+    import("./settings-advanced-group-public-notifications"),
+  ]);
+  const ResourcesAiGroup = resourcesAi.SettingsAdvancedResourcesAiGroup;
+  const BudgetDataGroup = budgetData.SettingsAdvancedBudgetDataGroup;
+  const CloudCalendarGroup = cloudCalendar.SettingsAdvancedCloudCalendarGroup;
+  const PublicNotificationsGroup = publicNotifications.SettingsAdvancedPublicNotificationsGroup;
   return {
-    DeferredSettingsAdvancedSections: module.SettingsAdvancedSections,
+    DeferredSettingsAdvancedSections: ({ controller, onReady }: { controller: Parameters<typeof ResourcesAiGroup>[0]["controller"]; onReady: () => void }) => (
+      <>
+        <ResourcesAiGroup controller={controller} onReady={onReady} />
+        <BudgetDataGroup controller={controller} onReady={onReady} />
+        <CloudCalendarGroup controller={controller} onReady={onReady} />
+        <PublicNotificationsGroup controller={controller} onReady={onReady} />
+      </>
+    ),
     preloadSettingsAdvancedSections: vi.fn(),
   };
 });
@@ -353,74 +369,6 @@ export function createUploadedAssetsManagerState(
     deletingAssetId: null,
     deleteAsset: vi.fn<UploadedAssetsManagerController["deleteAsset"]>().mockResolvedValue(true),
     ...controllerOverrides,
-  };
-}
-
-export function createCloudBackupControllerState(): CloudBackupController {
-  const fn = vi.fn();
-  const defaultPolicy = {
-    scheduleEnabled: false,
-    scheduleFrequency: "daily" as const,
-    scheduleTime: "03:00",
-    scheduleWeekday: "monday" as const,
-    retention: 7,
-  };
-  const defaultStatus = {
-    lastBackupAt: null,
-    lastStatus: "idle" as const,
-    lastError: null,
-    updatedAt: null,
-  };
-  return {
-    config: createSettingsReadState({
-      provider: "webdav" as const,
-      credentialSet: false,
-      credentialSetByProvider: { webdav: false, s3: false },
-      policyByProvider: { webdav: defaultPolicy, s3: defaultPolicy },
-      statusByProvider: { webdav: defaultStatus, s3: defaultStatus },
-      updatedAt: null,
-    }),
-    snapshots: createSettingsReadState([]),
-    isInitialLayoutReady: true,
-    form: {
-      provider: "webdav" as const,
-      webdavUrl: "",
-      webdavUsername: "",
-      webdavPassword: "",
-      webdavPath: "renewlet",
-      s3Endpoint: "",
-      s3Region: "",
-      s3Bucket: "",
-      s3Prefix: "renewlet",
-      s3AccessKeyId: "",
-      s3SecretAccessKey: "",
-      scheduleEnabled: false,
-      scheduleFrequency: "daily" as const,
-      scheduleTime: "03:00",
-      scheduleWeekday: "monday" as const,
-      retention: "7",
-    },
-    credentialSet: false,
-    canCreateSnapshot: false,
-    isSaving: false,
-    isTesting: false,
-    isCreating: false,
-    isDownloading: false,
-    isDeleting: false,
-    restoringSnapshotKey: null,
-    deletingSnapshotKey: null,
-    hasUnsavedChanges: false,
-    snapshotsErrorMessage: null,
-    cloudBackupErrorDetails: null,
-    cloudBackupErrorDetailsOpen: false,
-    setCloudBackupErrorDetailsOpen: fn,
-    openSnapshotsErrorDetails: fn,
-    updateForm: fn,
-    saveConfig: fn,
-    testConfig: fn,
-    createSnapshot: fn,
-    restoreSnapshot: fn,
-    deleteSnapshot: fn,
   };
 }
 
@@ -762,7 +710,12 @@ export function createCalendarFeedControllerState(
 
 function RouteProbe() {
   const location = useLocation();
-  return <div data-testid="route-path">{location.pathname}</div>;
+  return (
+    <>
+      <div data-testid="route-path">{location.pathname}</div>
+      <div data-testid="route-hash">{location.hash}</div>
+    </>
+  );
 }
 
 export function renderSettingsScreen(initialEntries = ["/settings"]) {

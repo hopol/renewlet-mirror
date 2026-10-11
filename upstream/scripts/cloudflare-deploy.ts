@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { LOCALE_PREFERENCES } from "../packages/shared/src/i18n-config";
+import { LOCALE_PREFERENCES } from "@renewlet/shared/i18n-config";
 import {
   captureBookmark,
   deploymentRecoveryCommand,
@@ -20,13 +20,11 @@ import {
   writeWranglerConfig,
   type WranglerConfig,
 } from "./cloudflare-wrangler-config";
+import { SUBSCRIPTION_DERIVED_BACKFILL_NAME } from "./cloudflare-derived-backfill-state";
+import { readActiveWorkerDeployment, type ActiveDeployment } from "./cloudflare-worker-deployment";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const drainWindowMs = 15 * 60 * 1000;
-
-interface ActiveDeployment {
-  versionId: string;
-}
 
 interface D1TriggerDefinition {
   name: string;
@@ -48,6 +46,7 @@ export interface DeploymentOperations {
   ensureQueues(): Promise<void>;
   readActiveDeployment(): Promise<ActiveDeployment | undefined>;
   readAppliedExclusiveMigrations(names: readonly string[]): Promise<Set<string>>;
+  readPendingDerivedBackfill(): Promise<boolean>;
   captureBookmark(): Promise<string>;
   deployMaintenance(): Promise<ActiveDeployment>;
   waitForBackgroundDrain(): Promise<void>;
@@ -100,7 +99,7 @@ async function containAfterDatabaseWrite(
   throw failure;
 }
 
-/** 排他 migration 只有在旧后台执行完全排空后才能首次写 D1；写入后任何失败都保持 fail-closed。 */
+/** 排他 migration 或 v4 派生回填都必须在旧后台完全排空后首次写 D1；写入后任何失败都保持 fail-closed。 */
 export async function runCloudflareDeployment(operations: DeploymentOperations, names: readonly string[]): Promise<void> {
   await operations.prepare();
   await operations.ensureQueues();
@@ -108,11 +107,13 @@ export async function runCloudflareDeployment(operations: DeploymentOperations, 
   const previous = await operations.readActiveDeployment();
   const applied = await operations.readAppliedExclusiveMigrations(names);
   const pending = names.filter((name) => !applied.has(name));
+  // v4 marker 是 cancelled 派生语义的发布边界；即使没有新的排他 SQL migration，回填期间也必须停写。
+  const derivedBackfillPending = pending.length === 0 && await operations.readPendingDerivedBackfill();
   const bookmark = await operations.captureBookmark();
   operations.recordCheckpoint(bookmark, previous?.versionId);
 
   let maintenanceVersion: string | undefined;
-  if (pending.length > 0 && previous !== undefined) {
+  if ((pending.length > 0 || derivedBackfillPending) && previous !== undefined) {
     try {
       maintenanceVersion = (await operations.deployMaintenance()).versionId;
       if (maintenanceVersion === previous.versionId) {
@@ -209,22 +210,6 @@ function parseJson(text: string, context: string): unknown {
   } catch {
     throw new Error(`${context} returned invalid JSON`);
   }
-}
-
-function parseActiveDeployment(value: unknown): ActiveDeployment {
-  if (!isJsonObject(value) || !Array.isArray(value["versions"])) {
-    throw new Error("Wrangler deployment status returned an invalid object");
-  }
-  const versions = value["versions"];
-  if (versions.length !== 1 || !isJsonObject(versions[0])) {
-    throw new Error("Renewlet deployment requires one active Worker version at 100% traffic");
-  }
-  const versionId = versions[0]["version_id"];
-  const percentage = versions[0]["percentage"];
-  if (typeof versionId !== "string" || versionId.length === 0 || percentage !== 100) {
-    throw new Error("Renewlet deployment requires one active Worker version at 100% traffic");
-  }
-  return { versionId: safeWorkerVersion(versionId) };
 }
 
 function parseD1NameRow(value: unknown): string {
@@ -377,17 +362,16 @@ function deploymentSummary(bookmark: string, versionId?: string): string {
 }
 
 function createOperations(options: DeployOptions): DeploymentOperations {
-  const environment = { ...process.env, CI_WRANGLER_CONFIG: options.configPath };
+  const environment: NodeJS.ProcessEnv = { ...process.env, CI_WRANGLER_CONFIG: options.configPath };
   const d1 = createD1OperationsClient({ target: "remote", configPath: options.configPath });
 
   const readActiveDeployment = async (): Promise<ActiveDeployment | undefined> => {
-    const result = await runPnpm(["exec", "wrangler", "deployments", "status", "--json", "--config", options.configPath]);
-    if (result.status !== 0) {
-      const output = `${result.stderr}\n${result.stdout}`;
-      if (/has no deployments|script[_ -]?not[_ -]?found|worker.+not found/i.test(output)) return undefined;
-      throw commandFailure("wrangler deployments status", result);
-    }
-    return parseActiveDeployment(parseJson(result.stdout, "Wrangler deployment status"));
+    const config = readWranglerConfig(options.configPath);
+    return readActiveWorkerDeployment({
+      accountId: environment["CLOUDFLARE_ACCOUNT_ID"]?.trim() ?? "",
+      apiToken: environment["CLOUDFLARE_API_TOKEN"]?.trim() ?? "",
+      workerName: requiredString(config, "name", "Wrangler config"),
+    });
   };
 
   const readAppliedExclusiveMigrations = async (names: readonly string[]): Promise<Set<string>> => {
@@ -404,6 +388,22 @@ function createOperations(options: DeployOptions): DeploymentOperations {
       parseD1NameRow,
     );
     return new Set(rows);
+  };
+
+  const readPendingDerivedBackfill = async (): Promise<boolean> => {
+    // 这里只做 marker 快速门禁决定是否停写；列签名、派生不变量和外键仍由回填脚本完整校验，避免部署前重复全量扫描。
+    const table = await d1.query(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'subscription_derived_backfills' LIMIT 1",
+      [],
+      parseD1NameRow,
+    );
+    if (table.length === 0) return true;
+    const marker = await d1.query(
+      "SELECT name FROM subscription_derived_backfills WHERE name = ? LIMIT 1",
+      [SUBSCRIPTION_DERIVED_BACKFILL_NAME],
+      parseD1NameRow,
+    );
+    return marker.length === 0;
   };
 
   const deploy = async (configPath: string, message: string): Promise<ActiveDeployment> => {
@@ -424,6 +424,7 @@ function createOperations(options: DeployOptions): DeploymentOperations {
     },
     readActiveDeployment,
     readAppliedExclusiveMigrations,
+    readPendingDerivedBackfill,
     async captureBookmark() {
       return await captureBookmark(options.configPath);
     },
