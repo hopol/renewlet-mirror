@@ -43,7 +43,7 @@ import {
 } from "./settings-layout";
 import { CheckboxSettingRow, LoadingButtonContent } from "./settings-shared-controls";
 
-/** 设置页同步层只保留首屏区块、目录和统一保存状态；低频高级区块按滚动/导航 intent 装载。 */
+/** 设置页首屏先提交目录和保存状态，高级分组随后由独立 chunk 自动挂载；目录 intent 只提前预取代码。 */
 export function SettingsScreen() {
   const { t, previewLocalePreference } = useI18n();
   const lunarCalendar = useLunarCalendar();
@@ -68,6 +68,10 @@ export function SettingsScreen() {
     passwordResetEnabled,
     sensitiveAccountActionsDisabled,
     sensitiveAccountActionsDemoDisabled,
+    appStatusHasError,
+    appStatusHasData,
+    appStatusIsRefreshing,
+    retryAppStatus,
   } = controller;
   const {
     passwordDialogOpen,
@@ -134,6 +138,17 @@ export function SettingsScreen() {
                 <h1 className="text-2xl font-bold text-foreground">{t("settings.title")}</h1>
                 <p className="mt-1 text-sm text-muted-foreground">{t("settings.subtitle")}</p>
               </div>
+
+              {appStatusHasError ? (
+                <div className="flex flex-col gap-2 border border-destructive/30 bg-destructive/10 p-3 sm:flex-row sm:items-center sm:justify-between" role="alert">
+                  <span className="text-sm text-destructive">
+                    {appStatusHasData ? t("settings.managerRefreshFailed") : t("settings.managerLoadFailed")}
+                  </span>
+                  <Button type="button" variant="outline" size="sm" className="h-11 border-border" onClick={() => void retryAppStatus()} disabled={appStatusIsRefreshing} aria-busy={appStatusIsRefreshing ? true : undefined}>
+                    {t("settings.managerRetry")}
+                  </Button>
+                </div>
+              ) : null}
 
               <AccountSettingsSection
                 id="settings-account"
@@ -227,7 +242,6 @@ export function SettingsScreen() {
 
               <DeferredSettingsAdvancedSections
                 controller={controller}
-                activeSectionId={activeSectionId}
                 onReady={markDeferredSectionsReady}
               />
             </div>
