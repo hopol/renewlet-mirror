@@ -61,7 +61,7 @@ http://localhost:3000/setup
 正式使用时建议固定版本：
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.34"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.36"#' .env
 docker compose pull
 docker compose up -d
 ```
@@ -69,7 +69,7 @@ docker compose up -d
 如果 Docker Hub 拉取不可用，改用 GHCR：
 
 ```env
-RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.34"
+RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.36"
 ```
 
 ## Cloudflare Workers
@@ -79,6 +79,12 @@ RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.34"
 点击上方按钮直接部署。需要自己管理 Cloudflare 资源时，请按 [Cloudflare Workers 部署](docs/cloudflare-workers-deploy.zh-CN.md) 操作。
 
 升级已有实例时不要再次点击部署按钮，按部署文档同步现有仓库即可。
+
+## 第三方托管服务
+
+RepoCloud 是独立于 Renewlet 的第三方付费 VPS 托管服务。资源可用性、价格、部署行为和技术支持由 RepoCloud 负责，Renewlet 不提供该服务。
+
+<a href="https://repocloud.io/details/Renewlet/"><img src="https://d16t0pc4846x52.cloudfront.net/deploylobe.svg" alt="在 RepoCloud 部署" height="39"></a>
 
 ## 升级
 
@@ -91,7 +97,7 @@ tar -czf renewlet-backup-$(date +%F).tgz .env docker-compose.yml data
 更新 Docker 镜像：
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.34"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.36"#' .env
 docker compose pull
 docker compose up -d
 docker compose logs -f

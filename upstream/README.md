@@ -61,7 +61,7 @@ Create the first administrator. The deploy script creates `docker-compose.yml`, 
 For production, pin a stable image tag:
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.34"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.36"#' .env
 docker compose pull
 docker compose up -d
 ```
@@ -69,7 +69,7 @@ docker compose up -d
 If Docker Hub is unavailable, use GHCR:
 
 ```env
-RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.34"
+RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.36"
 ```
 
 ## Cloudflare Workers
@@ -79,6 +79,12 @@ RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.34"
 Click the button to deploy. To manage the Cloudflare resources yourself, follow the [Cloudflare Workers deployment guide](docs/cloudflare-workers-deploy.md).
 
 For upgrades, update the existing repository as described in the guide instead of clicking the deploy button again.
+
+## Third-Party Hosting
+
+RepoCloud is an independent, paid VPS hosting provider. Availability, pricing, deployment behavior, and support are managed by RepoCloud, not by Renewlet.
+
+<a href="https://repocloud.io/details/Renewlet/"><img src="https://d16t0pc4846x52.cloudfront.net/deploylobe.svg" alt="Deploy on RepoCloud" height="39"></a>
 
 ## Upgrade
 
@@ -91,7 +97,7 @@ tar -czf renewlet-backup-$(date +%F).tgz .env docker-compose.yml data
 Update the Docker image:
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.34"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.36"#' .env
 docker compose pull
 docker compose up -d
 docker compose logs -f
