@@ -33,6 +33,7 @@ Renewlet 是一个会在续费前提醒你的自托管订阅账本。把订阅�
 ## 功能
 
 - 记录订阅：价格、扣费周期、续费日、付款方式和备注都放在一处。
+- 在订阅的「更多操作」里暂停订阅。恢复时选择活跃或试用并核对日期。暂停期间仍可收到家庭共享收款提醒。
 - 查看支出：按月或按年汇总费用，跟踪预算并换算不同币种。
 - 续费提醒：按你的时区提前发送，渠道包括 Telegram、Notifyx、Webhook、企业微信、钉钉、邮件、Bark、Server酱、Discord 和 PushPlus。
 - 录入和迁移：从截图、备忘录或表格生成可编辑草稿，确认后再导入；也可以导入导出 Renewlet 数据或迁入 Wallos 文件。
@@ -61,7 +62,7 @@ http://localhost:3000/setup
 正式使用时建议固定版本：
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.37"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.39"#' .env
 docker compose pull
 docker compose up -d
 ```
@@ -69,7 +70,7 @@ docker compose up -d
 如果 Docker Hub 拉取不可用，改用 GHCR：
 
 ```env
-RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.37"
+RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.39"
 ```
 
 ## Cloudflare Workers
@@ -85,19 +86,22 @@ RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.37"
 升级前先备份数据和配置：
 
 ```bash
-tar -czf renewlet-backup-$(date +%F).tgz .env docker-compose.yml data
+docker compose stop web &&
+(umask 077 && tar -czf "renewlet-backup-$(date +%Y%m%d-%H%M%S).tgz" .env docker-compose.yml data)
 ```
+
+请妥善保管备份，它包含数据库、本地文件和原始 `PB_ENCRYPTION_KEY`。备份失败时，先用 `docker compose start web` 恢复原服务。回退数据迁移时，请停服并一起恢复同一备份的数据、配置和对应镜像。应用内的程序更新只管理二进制文件。
 
 更新 Docker 镜像：
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.37"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.39"#' .env
 docker compose pull
 docker compose up -d
 docker compose logs -f
 ```
 
-也可以点击页面顶部的版本号，在“系统更新”中完成更新。
+如果选择应用内更新，备份后先执行 `docker compose start web` 启动原服务，再点击页面顶部的版本号，打开“系统更新”。
 
 ## 常用命令
 
@@ -146,6 +150,21 @@ docker compose up -d --force-recreate
 需要接入 [Microsoft Clarity](https://learn.microsoft.com/zh-cn/clarity/setup-and-installation/clarity-setup) 等第三方服务时，把服务商提供的 `<head>` 代码原样填入 `RENEWLET_CUSTOM_HEAD_HTML`。Docker `.env` 中的多行代码用单引号包裹。
 
 只添加你信任的代码，它可以访问 Renewlet 页面中的数据。修改后，Docker 部署需重启容器，Cloudflare 部署需重新构建并部署。
+
+## 单点登录（OpenID Connect）
+
+Docker 和 Cloudflare 部署均可在设置页接入一个 OIDC 身份提供方。默认关闭，已有用户可继续用密码或通行密钥登录。
+
+1. 管理员通过平时访问 Renewlet 的 HTTPS 域名打开 **设置 → 访问安全 → 配置单点登录**，复制回调地址。
+2. 在提供方创建机密 Web 客户端，将回调地址原样登记为精确匹配。客户端需支持 OIDC Discovery、授权码流程、PKCE S256 和 `openid` 范围，并签发 RS256 签名的非加密 ID Token。浏览器和 Renewlet 后端都需要能访问提供方的公网 HTTPS 端点。
+3. 在 Renewlet 填入 Discovery 文档的 **issuer** 原值、客户端 ID 和密钥。选择 **测试登录**，在提供方完成认证，返回后选择 **保存并启用**。取消或测试失败时，原配置继续生效。更换域名或客户端时，重新登记回调并测试。
+4. 每位用户先用已有 Renewlet 账号登录，在 **设置 → 账号 → 管理绑定** 输入当前密码，前往提供方认证，返回核对身份并确认。此后可在登录页选择单点登录。已开启身份验证器的账号仍需完成本地第二步验证。绑定和解绑后，其他设备需要重新登录。
+
+authentik 可使用默认的每应用 issuer，例如 `https://id.example.com/application/o/renewlet/`，保留末尾斜杠。选择 RSA 签名密钥，清空加密密钥。其他符合上述协议要求的提供方也可使用同一个入口。[authentik 提供方配置](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/)
+
+Google 的 Web 客户端可填写 `https://accounts.google.com` 并通过测试登录确认。若希望用 GitHub 账号登录，可在 authentik 中添加 GitHub 登录源，Renewlet 仍连接同一个 issuer。[Google OIDC 文档](https://developers.google.com/identity/openid-connect/openid-connect) · [authentik 的 GitHub 登录源](https://docs.goauthentik.io/users-sources/sources/social-logins/github/)
+
+绑定按提供方和用户标识识别，Renewlet 的用户创建和角色分配仍由本站管理员管理。停用单点登录会关闭新的外部登录并保留绑定。若更换提供方，用户可用本地方式登录，解绑后重新绑定。反向代理应传递可信的公网协议和主机名，并在回调路径的访问日志中省略查询参数。
 
 ## 截图
 
